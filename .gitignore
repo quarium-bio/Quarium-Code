@@ -1,0 +1,16 @@
+# Databases
+*.db
+stock_backups/
+
+# Credentials and Local Settings
+credentials.json
+token.json
+local_config.json
+users.json
+settings.json
+temp_lock.json
+QLogo.png
+
+# Python caches
+__pycache__/
+*.pyc
