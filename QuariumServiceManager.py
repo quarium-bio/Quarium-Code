@@ -1218,16 +1218,7 @@ class ServiceManager:
         def save_edit():
             try:
                 new_type = type_var.get().strip()
-                amt_str = amount_var.get().strip()
-                if ',' in amt_str:
-                    proposed = amt_str.replace(',', '.')
-                    if messagebox.askyesno("Convert Decimal", f"You entered '{amt_str}'. Convert to '{proposed}'?", parent=dialog):
-                        amt_str = proposed
-                        amount_var.set(proposed)
-                    else:
-                        return
-                        
-                new_amount = float(amt_str)
+                new_amount = float(amount_var.get().replace(',', '.'))
                 try:
                     new_samples = int(samples_var.get())
                     if new_samples < 1:
@@ -1314,13 +1305,13 @@ class ServiceManager:
             self.conn.close()
         except Exception:
             pass
-        if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.destroy()
 
     # Drag and drop functionality
     def on_drag_start(self, event):
         """Start drag operation"""
         item = self.services_tree.identify_row(event.y)
+        if not item:
+            return
         if item:
             item_type, item_id = self.services_tree.item(item, "tags")
             if item_type == "service":  # Only allow dragging services
@@ -1338,6 +1329,7 @@ class ServiceManager:
 
         self.drag_occurred = True
         # Find item under cursor
+        self.root.config(cursor="") # Reset cursor
         current_item = self.services_tree.identify_row(event.y)
         
         # Clear previous visual feedback
@@ -1351,17 +1343,20 @@ class ServiceManager:
             if item_type == "category":
                 self.services_tree.item(current_item, open=True)
                 # Highlight the category to show it's a valid drop target
+                self.root.config(cursor="plus")
                 self.services_tree.selection_add(current_item)
                 self.drag_highlight = current_item
             elif item_type == "service" and current_item != self.drag_item:
                 # Show that services are not valid drop targets by briefly highlighting
                 # (this gives feedback that the drop won't work here)
+                self.root.config(cursor="no")
                 self.services_tree.selection_add(current_item)
                 self.drag_highlight = current_item
                 # Could add a timer to remove this highlight after a brief moment
             else:
                 self.drag_highlight = None
         else:
+            self.root.config(cursor="no")
             self.drag_highlight = None
 
     def on_drag_end(self, event):
@@ -1382,6 +1377,7 @@ class ServiceManager:
         # Clear visual feedback
         if hasattr(self, 'drag_highlight') and self.drag_highlight:
             self.services_tree.selection_remove(self.drag_highlight)
+        self.root.config(cursor="") # Reset cursor
         
         # Restore original selection if it was a service
         if hasattr(self, 'original_selection'):
@@ -1461,291 +1457,6 @@ class ServiceManager:
         # Use a themed label for consistency, with a border for the tooltip effect
         label = ttk.Label(self.tooltip, text=text, justify='left',
                          wraplength=300, padding=5, relief="solid", borderwidth=1)
-        label.pack()
-
-    def hide_tooltip(self):
-        if getattr(self, 'tooltip', None):
-            self.tooltip.destroy()
-            self.tooltip = None
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = ServiceManager(root)
-    root.mainloop()
-    def edit_cost(self):
-        """Edit selected cost"""
-        selection = self.costs_tree.selection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a cost to edit")
-            return
-
-        item = selection[0]
-        cost_id = self.costs_tree.item(item, "tags")[0]
-
-        self.cursor.execute('SELECT cost_type, cost, samples_per_batch, notes FROM service_costs WHERE id = ?', (cost_id,))
-        cost_data = self.cursor.fetchone()
-        if not cost_data:
-            return
-
-        cost_type, amount, samples_per_batch, notes = cost_data
-
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Edit Cost")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        ttk.Label(dialog, text="Cost Type:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
-        type_var = tk.StringVar(value=cost_type)
-        cost_options = ["Labor", "Maintenance", "Profit"]
-        ttk.Combobox(dialog, textvariable=type_var, values=cost_options, width=15, state='readonly').grid(row=0, column=1, padx=10, pady=5, sticky="w")
-
-        ttk.Label(dialog, text="Amount (R$):").grid(row=1, column=0, sticky="w", padx=10, pady=5)
-        amount_var = tk.StringVar(value=str(amount))
-        ttk.Entry(dialog, textvariable=amount_var, width=15).grid(row=1, column=1, padx=10, pady=5, sticky="w")
-
-        is_bulk_var = tk.BooleanVar(value=(samples_per_batch > 1))
-        samples_var = tk.StringVar(value=str(samples_per_batch))
-
-        def toggle_bulk_edit():
-            if is_bulk_var.get():
-                samples_entry.config(state='normal')
-            else:
-                samples_var.set("1")
-                samples_entry.config(state='disabled')
-
-        ttk.Checkbutton(dialog, text="Per Group", variable=is_bulk_var, command=toggle_bulk_edit).grid(row=2, column=0, sticky="w", padx=10, pady=5)
-        samples_entry = ttk.Entry(dialog, textvariable=samples_var, width=15, state='normal' if is_bulk_var.get() else 'disabled')
-        samples_entry.grid(row=2, column=1, padx=10, pady=5, sticky="w")
-
-        ttk.Label(dialog, text="Notes:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
-        notes_var = tk.StringVar(value=notes or "")
-        ttk.Entry(dialog, textvariable=notes_var, width=30).grid(row=3, column=1, padx=10, pady=5, sticky="w")
-
-        def save_edit():
-            try:
-                new_type = type_var.get().strip()
-                new_amount = float(amount_var.get())
-                try:
-                    new_samples = int(samples_var.get())
-                    if new_samples < 1:
-                        new_samples = 1
-                except ValueError:
-                    new_samples = 1
-                new_notes = notes_var.get().strip()
-
-                self.cursor.execute('''
-                    UPDATE service_costs
-                    SET cost_type = ?, cost = ?, samples_per_batch = ?, notes = ?
-                    WHERE id = ?
-                ''', (new_type, new_amount, new_samples, new_notes, cost_id))
-                self.conn.commit()
-                self.load_costs()
-                dialog.destroy()
-            except ValueError:
-                messagebox.showerror("Error", "Amount must be a number", parent=dialog)
-            except sqlite3.Error as e:
-                messagebox.showerror("Database Error", f"Could not update cost: {e}", parent=dialog)
-
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=15)
-        ttk.Button(btn_frame, text="Save", command=save_edit).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
-
-    def remove_cost(self):
-        """Remove selected cost"""
-        selection = self.costs_tree.selection()
-        if not selection:
-            messagebox.showerror("Error", "Please select a cost to remove")
-            return
-
-        if messagebox.askyesno("Confirm Remove", "Remove this cost?"):
-            item = selection[0]
-            cost_id = self.costs_tree.item(item, "tags")[0]
-
-            try:
-                self.cursor.execute('DELETE FROM service_costs WHERE id = ?', (cost_id,))
-                self.conn.commit()
-                self.load_costs()
-            except sqlite3.Error as e:
-                messagebox.showerror("Database Error", f"Could not remove cost: {e}")
-
-    def load_costs(self):
-        """Load non-reagent costs for current service"""
-        for item in self.costs_tree.get_children():
-            self.costs_tree.delete(item)
-
-        if not self.current_service_id:
-            return
-
-        try:
-            self.cursor.execute('''
-                SELECT id, cost_type, cost, samples_per_batch, notes
-                FROM service_costs
-                WHERE service_id = ?
-                ORDER BY id
-            ''', (self.current_service_id,))
-
-            for cost_id, cost_type, cost, samples_per_batch, notes in self.cursor.fetchall():
-                self.costs_tree.insert("", "end", text=cost_type,
-                                       values=(f"R${cost:.2f}", samples_per_batch or 1, notes or ""),
-                                       tags=(cost_id,))
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Could not load costs: {e}")
-
-    def clear_costs(self):
-        """Clear costs display"""
-        for item in self.costs_tree.get_children():
-            self.costs_tree.delete(item)
-        if hasattr(self, 'cost_type_var'):
-            self.cost_type_var.set("")
-            self.cost_amount_var.set("")
-            self.cost_is_bulk_var.set(False)
-            self.cost_samples_var.set("1")
-            self.cost_samples_entry.config(state='disabled')
-            self.cost_notes_var.set("")
-
-    def on_closing(self):
-        """Handle window closing"""
-        try:
-            self.conn.commit()
-            self.conn.close()
-        except Exception:
-            pass
-        if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.destroy()
-
-    # Drag and drop functionality
-    def on_drag_start(self, event):
-        """Start drag operation"""
-        item = self.services_tree.identify_row(event.y)
-        if item:
-            item_type, item_id = self.services_tree.item(item, "tags")
-            if item_type == "service":  # Only allow dragging services
-                self.drag_item = item
-                self.drag_item_type = item_type
-                self.drag_item_id = item_id
-                # Store original selection to restore later
-                self.original_selection = self.services_tree.selection()
-
-    def on_drag_motion(self, event):
-        """Handle drag motion with visual feedback and auto-expansion"""
-        if not hasattr(self, 'drag_item') or not self.drag_item:
-            return
-
-        # Find item under cursor
-        current_item = self.services_tree.identify_row(event.y)
-        
-        # Clear previous visual feedback
-        if hasattr(self, 'drag_highlight') and self.drag_highlight:
-            self.services_tree.selection_remove(self.drag_highlight)
-        
-        if current_item:
-            item_type, item_id = self.services_tree.item(current_item, "tags")
-            
-            # Auto-expand categories when hovering over them
-            if item_type == "category":
-                self.services_tree.item(current_item, open=True)
-                # Highlight the category to show it's a valid drop target
-                self.services_tree.selection_add(current_item)
-                self.drag_highlight = current_item
-            elif item_type == "service" and current_item != self.drag_item:
-                # Show that services are not valid drop targets by briefly highlighting
-                # (this gives feedback that the drop won't work here)
-                self.services_tree.selection_add(current_item)
-                self.drag_highlight = current_item
-                # Could add a timer to remove this highlight after a brief moment
-            else:
-                self.drag_highlight = None
-        else:
-            self.drag_highlight = None
-
-    def on_drag_end(self, event):
-        """Complete drag operation"""
-        if not hasattr(self, 'drag_item') or not self.drag_item:
-            return
-
-        # Clear visual feedback
-        if hasattr(self, 'drag_highlight') and self.drag_highlight:
-            self.services_tree.selection_remove(self.drag_highlight)
-        
-        # Restore original selection if it was a service
-        if hasattr(self, 'original_selection'):
-            try:
-                item_type, _ = self.services_tree.item(self.original_selection[0], "tags") if self.original_selection else (None, None)
-                if item_type == "service":
-                    self.services_tree.selection_set(self.original_selection)
-            except:
-                pass
-
-        # Find the target item
-        target_item = self.services_tree.identify_row(event.y)
-        if target_item and target_item != self.drag_item:
-            target_type, target_id = self.services_tree.item(target_item, "tags")
-
-            if target_type == "category" and self.drag_item_type == "service":
-                # Moving service to a category
-                try:
-                    if target_id is None or target_id == 'None':
-                        # Moving to "Uncategorized" - set category_id to NULL
-                        self.cursor.execute(
-                            "UPDATE services SET category_id = NULL WHERE id = ?",
-                            (self.drag_item_id,)
-                        )
-                    else:
-                        # Moving to a regular category
-                        self.cursor.execute(
-                            "UPDATE services SET category_id = ? WHERE id = ?",
-                            (target_id, self.drag_item_id)
-                        )
-                    self.conn.commit()
-                    self.load_services()
-                except sqlite3.Error as e:
-                    messagebox.showerror("Database Error", f"Could not move service: {e}")
-                    # Debug: print the actual error
-                    print(f"Debug: target_id={target_id}, drag_item_id={self.drag_item_id}, error: {e}")
-
-        # Clear drag state
-        self.drag_item = None
-        self.drag_item_type = None
-        self.drag_item_id = None
-        if hasattr(self, 'drag_highlight'):
-            self.drag_highlight = None
-        if hasattr(self, 'original_selection'):
-            delattr(self, 'original_selection')
-
-    def on_tree_motion(self, event):
-        item = self.services_tree.identify_row(event.y)
-        column = self.services_tree.identify_column(event.x)
-        
-        if item and column == "#2":
-            values = self.services_tree.item(item, "values")
-            if len(values) > 1 and values[1]:
-                desc_text = values[1]
-                
-                if getattr(self, 'tooltip_item', None) == item:
-                    return
-                
-                self.hide_tooltip()
-                self.tooltip_item = item
-                self.show_tooltip(event.x_root, event.y_root, desc_text)
-                return
-
-        if getattr(self, 'tooltip_item', None) is not None:
-            self.hide_tooltip()
-            self.tooltip_item = None
-
-    def on_tree_leave(self, event):
-        self.hide_tooltip()
-        self.tooltip_item = None
-
-    def show_tooltip(self, x, y, text):
-        self.tooltip = tk.Toplevel(self.root)
-        self.tooltip.wm_overrideredirect(True)
-        self.tooltip.wm_geometry(f"+{x+15}+{y+15}")
-        
-        label = ttk.Label(self.tooltip, text=text, justify='left',
-                         relief='solid', borderwidth=1,
-                         wraplength=300, padding=5)
         label.pack()
 
     def hide_tooltip(self):

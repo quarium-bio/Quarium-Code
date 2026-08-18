@@ -12,6 +12,8 @@ from tkinter import filedialog
 import sqlite3
 import urllib.request
 import urllib.error
+import re
+import secrets
 
 # Import the application classes
 from QuariumClientManager import ClientManager
@@ -20,6 +22,8 @@ from QuariumProjectManager import ProjectManager # New import
 from CompositeStockManager import CompositeStockManager
 from QuariumSM import StockManager
 from QuariumProjectFlow import ProjectFlowManager
+from QuariumContractManager import ContractManager # New import
+from QuariumFinanceManager import FinanceManager
 
 try:
     from QuariumDriveSync import DriveSyncManager
@@ -38,8 +42,10 @@ except ImportError:
     InvalidToken = Exception
     hashes = MagicMock()
     PBKDF2HMAC = MagicMock()
+    # Add this line to prevent errors if crypto is missing
+    os.urandom = lambda x: b'x' * x 
 
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.2.1"
 UPDATE_URL = "https://raw.githubusercontent.com/quarium-bio/bio-dashboard/main/version.json" # Change to your actual raw URL
 
 class QuariumDashboard:
@@ -47,20 +53,87 @@ class QuariumDashboard:
         self.root = root
         self.root.title("Quarium Dashboard")
         self.root.withdraw() # Hide until authenticated
-        
+
         self.apps = {}
         self.frames = {}
         self.current_user = None
-        self.drive_sync = None # Initialize to None
-        self.db_files = ['stock.db', 'services.db', 'clients.db', 'projects.db', 'users.json', 'settings.json', 'QLogo.png', 'EstimateLogo.png']
+        self.drive_sync = None  # Initialize to None
+        self.local_file_mod_times = {} # To track local file changes
+        self.db_files = ['stock.db', 'services.db', 'clients.db', 'projects.db', 'users.json', 'settings.json', 'QLogo.png', 'EstimateLogo.png', 'ContractTemplate_PF.docx', 'ContractTemplate_PJ.docx', 'ContractShell.docx', 'ContractHeader_PF.docx', 'ContractHeader_PJ.docx']
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.startup_check()
+        
+        self.create_splash_screen()
+        # Run the startup sequence in a separate thread to keep the splash screen responsive
+        threading.Thread(target=self.startup_sequence, daemon=True).start()
+
+    def _hash_password(self, password: str, salt: bytes) -> str:
+        """Hashes a password with the given salt."""
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=480000,
+        )
+        key = kdf.derive(password.encode())
+        return base64.urlsafe_b64encode(key).decode('utf-8')
+
+    def _verify_password(self, stored_hash: str, salt_b64: str, provided_password: str) -> bool:
+        """Verifies a provided password against a stored hash and salt."""
+        salt = base64.urlsafe_b64decode(salt_b64.encode('utf-8'))
+        return self._hash_password(provided_password, salt) == stored_hash
+
+    def create_splash_screen(self):
+        self.splash = tk.Toplevel(self.root)
+        self.splash.overrideredirect(True) # No title bar
+        
+        width, height = 450, 300
+        screen_width = self.splash.winfo_screenwidth()
+        screen_height = self.splash.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        self.splash.geometry(f'{width}x{height}+{x}+{y}')
+        
+        splash_frame = ttk.Frame(self.splash, style="TFrame", relief="solid", borderwidth=1)
+        splash_frame.pack(fill="both", expand=True)
+
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'QLogo.png')
+        if os.path.exists(logo_path):
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(logo_path)
+                img.thumbnail((150, 150)) # Resize to max 150x150, preserving aspect ratio
+                self.splash_logo_img = ImageTk.PhotoImage(img)
+            except ImportError:
+                # Fallback for when Pillow is not installed
+                self.splash_logo_img = tk.PhotoImage(file=logo_path)
+                if self.splash_logo_img.height() > 150:
+                    factor = self.splash_logo_img.height() // 150
+                    self.splash_logo_img = self.splash_logo_img.subsample(factor, factor)
+            
+            logo_label = ttk.Label(splash_frame, image=self.splash_logo_img)
+            logo_label.image = self.splash_logo_img # Keep a reference
+            logo_label.pack(pady=(20, 10))
+
+        ttk.Label(splash_frame, text="Quarium Dashboard", font=('Helvetica', 16, 'bold')).pack()
+        self.splash_status_label = ttk.Label(splash_frame, text="Initializing...", font=('Helvetica', 10))
+        self.splash_status_label.pack(pady=(20, 5))
+        
+        self.splash_progress = ttk.Progressbar(splash_frame, orient="horizontal", length=300, mode='determinate')
+        self.splash_progress.pack(pady=10)
+
+    def update_splash(self, text, value):
+        # Ensure UI updates are done on the main thread
+        def do_update():
+            if hasattr(self, 'splash') and self.splash.winfo_exists():
+                self.splash_status_label.config(text=text)
+                self.splash_progress['value'] = value
+        self.root.after(0, do_update)
         
     def check_updates(self):
         try:
             req = urllib.request.Request(UPDATE_URL, headers={'User-Agent': 'QuariumApp/1.0'})
-            with urllib.request.urlopen(req, timeout=3) as response:
+            with urllib.request.urlopen(req, timeout=5) as response:
                 data = json.loads(response.read().decode())
             
             latest_version = data.get("version", CURRENT_VERSION)
@@ -124,10 +197,13 @@ class QuariumDashboard:
             if os.path.exists("token.json"):
                 os.remove("token.json")
 
-    def startup_check(self):
+    def startup_sequence(self):
+        self.update_splash("Checking for updates...", 10)
         if not self.check_updates():
+            self.root.after(0, self.root.destroy)
             return
             
+        self.update_splash("Loading local configuration...", 20)
         config = self.load_local_config()
         
         # Legacy migration for existing users
@@ -146,10 +222,15 @@ class QuariumDashboard:
             
         active = config.get("active_company")
         if active and active in config["companies"] and not getattr(self, 'force_disconnect', False):
+            self.update_splash(f"Connecting to '{active}'...", 30)
             self.apply_profile(active, config)
             self.authenticate_and_sync()
         else:
-            self.show_connection_manager()
+            self.update_splash("Awaiting connection setup...", 30)
+            self.root.after(0, self.show_connection_manager)
+
+    def continue_startup_after_conn_manager(self):
+        self.root.after(0, self.authenticate_and_sync)
 
     def show_connection_manager(self):
         self.root.withdraw()
@@ -200,8 +281,9 @@ class QuariumDashboard:
                 config["active_company"] = comp_name
                 self.save_local_config(config)
                 self.apply_profile(comp_name, config)
+                self.update_splash(f"Connecting to '{comp_name}'...", 40)
                 conn_win.destroy()
-                self.authenticate_and_sync()
+                self.continue_startup_after_conn_manager()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load credentials: {e}", parent=conn_win)
             
@@ -210,20 +292,48 @@ class QuariumDashboard:
         
         self.root.wait_window(conn_win)
         if not getattr(self, 'current_user', None):
-            self.root.destroy()
+            self.root.after(0, self.root.destroy)
 
     def authenticate_and_sync(self):
+        # Pre-fetch lock info to see who is online for the login dialog
+        online_owner = None
+        if self.drive_sync:
+            try:
+                lock_data = self.drive_sync.read_lock()
+                if lock_data and lock_data.get('owner') and (time.time() - lock_data.get('last_active', 0) < 45):
+                    online_owner = lock_data.get('owner')
+            except Exception: pass
+        self.update_splash("Authenticating with Google Drive...", 45)
         if DriveSyncManager:
             try:
                 self.drive_sync = DriveSyncManager()
             except ImportError as e:
-                messagebox.showwarning("Sync Dependencies Missing", f"{e}\n\nOperating in local mode.")
+                self.root.after(0, lambda: messagebox.showwarning("Sync Dependencies Missing", f"{e}\n\nOperating in local mode."))
+                self.drive_sync = None
             except Exception as e:
-                messagebox.showerror("Sync Error", f"An unexpected error occurred during Google Drive sync: {e}\n\nOperating in local mode.")
+                self.root.after(0, lambda: messagebox.showerror("Sync Error", f"An unexpected error occurred during Google Drive sync: {e}\n\nOperating in local mode."))
+                self.drive_sync = None
         else:
-            messagebox.showinfo("Local Mode", "QuariumDriveSync not found or Google API libraries missing. Operating locally.")
+            self.root.after(0, lambda: messagebox.showinfo("Local Mode", "QuariumDriveSync not found or Google API libraries missing. Operating locally."))
+            self.drive_sync = None
+
+        self.update_splash("Syncing user data...", 55)
+        # **Fix:** Explicitly download the users.json file before showing the login dialog.
+        # This ensures that even on a fresh install, the user list is populated from the cloud.
+        if self.drive_sync:
+            try:
+                self.drive_sync.sync_down(['users.json'])
+            except Exception as e:
+                self.update_splash("Retrying user data sync...", 60)
+                print(f"Could not pre-sync users.json on first attempt: {e}. Retrying...") # Keep for debug
+                time.sleep(2) # Wait 2 seconds before retrying
+                try:
+                    self.drive_sync.sync_down(['users.json'])
+                except Exception as e2:
+                    print(f"Could not pre-sync users.json on second attempt: {e2}")
             
-        self.show_login_dialog()
+        self.update_splash("Awaiting user login...", 70)
+        self.root.after(0, lambda: self.show_login_dialog(online_owner))
         self.save_current_tokens_to_profile()
 
     def show_tutorial(self):
@@ -239,51 +349,138 @@ class QuariumDashboard:
         txt.insert("1.0", tutorial_content)
         txt.config(state="disabled")
 
-    def show_login_dialog(self):
+    def show_login_dialog(self, online_owner=None):
         login_win = tk.Toplevel(self.root)
         login_win.title("User Login")
-        login_win.geometry("300x200")
+        login_win.geometry("350x280")
         login_win.grab_set()
         login_win.focus_force() # Make sure it appears on top
+
+        # Center the window
+        login_win.update_idletasks()
+        width = login_win.winfo_width()
+        height = login_win.winfo_height()
+        x = (login_win.winfo_screenwidth() // 2) - (width // 2)
+        y = (login_win.winfo_screenheight() // 2) - (height // 2)
+        login_win.geometry(f'{width}x{height}+{x}+{y}')
 
         users = {}
         if os.path.exists('users.json'):
             with open('users.json', 'r') as f:
                 users = json.load(f)
-
-        ttk.Label(login_win, text="Select User:").pack(pady=(10, 5))
         
-        user_var = tk.StringVar()
-        user_combo = ttk.Combobox(login_win, textvariable=user_var, values=list(users.keys()), state='readonly')
-        user_combo.pack(pady=5)
+        ttk.Label(login_win, text="Select User:").pack(pady=(10, 2))
+        
+        user_listbox = tk.Listbox(login_win, height=5, exportselection=False)
+        user_listbox.pack(pady=5, padx=10, fill="x")
+        
+        user_keys = sorted(users.keys())
+        for user in user_keys:
+            user_listbox.insert(tk.END, user)
+            if user == online_owner:
+                user_listbox.itemconfig(tk.END, {'fg': 'grey'})
+
+        ttk.Label(login_win, text="Password:").pack(pady=(10, 2))
+        password_var = tk.StringVar()
+        password_entry = ttk.Entry(login_win, textvariable=password_var, show="*")
+        password_entry.pack()
+        password_entry.bind('<Return>', lambda event: login())
         
         def login():
-            selected = user_var.get()
+            selection = user_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Warning", "Please select a user", parent=login_win)
+                return
+
+            selected_index = selection[0]
+            selected = user_listbox.get(selected_index)
+            
+            password = password_var.get()
+            if not password:
+                messagebox.showwarning("Warning", "Password is required.", parent=login_win)
+                return
+
             if selected:
-                self.current_user = selected
-                login_win.destroy()
-                self.check_and_acquire_lock()
+                user_data = users.get(selected)
+                
+                # Handle migration from old format (string) to new format (dict)
+                if isinstance(user_data, str):
+                    messagebox.showinfo("New Security System", "As part of a security upgrade, you need to create a password for your account.", parent=login_win)
+                    new_pass = simpledialog.askstring("Create Password", "Enter new password:", show='*', parent=login_win)
+                    if not new_pass: return
+                    confirm_pass = simpledialog.askstring("Create Password", "Confirm new password:", show='*', parent=login_win)
+                    if new_pass != confirm_pass:
+                        messagebox.showerror("Error", "Passwords do not match.", parent=login_win)
+                        return
+                    
+                    salt = os.urandom(16)
+                    salt_b64 = base64.urlsafe_b64encode(salt).decode('utf-8')
+                    hashed_password = self._hash_password(new_pass, salt)
+                    
+                    users[selected] = {"full_name": user_data, "salt": salt_b64, "hash": hashed_password}
+                    _save_users_and_sync(users)
+                    messagebox.showinfo("Success", "Password created successfully. Please log in again.", parent=login_win)
+                    password_var.set("")
+                    return
+
+                # Standard password verification
+                stored_hash = user_data.get("hash")
+                stored_salt = user_data.get("salt")
+                if not self._verify_password(stored_hash, stored_salt, provided_password=password):
+                    messagebox.showerror("Login Failed", "Invalid username or password.", parent=login_win)
+                    return
+
+                if selected == online_owner:
+                    if messagebox.askyesno("User Active", f"User '{selected}' is currently active elsewhere.\n\nDo you want to request editing permissions from them?", parent=login_win):
+                        login_win.destroy()
+                        self.current_user = selected
+                        self.update_splash("Requesting edit access...", 75)
+                        self.request_lock(online_owner)
+                    return # Don't proceed with normal login
+                else:
+                    self.current_user = selected
+                    self.update_splash("Login successful. Checking database status...", 75)
+                    # Defer the rest of the startup to allow the splash screen to update
+                    login_win.after(100, lambda: [login_win.destroy(), self.check_and_acquire_lock()])
             else:
-                messagebox.showwarning("Warning", "Please select a user")
+                messagebox.showwarning("Warning", "Invalid username or password.", parent=login_win)
+
+        def _save_users_and_sync(users_dict):
+            with open('users.json', 'w') as f:
+                json.dump(users_dict, f, indent=2)
+            if self.drive_sync:
+                try: self.drive_sync.sync_up(['users.json'])
+                except Exception as e: print("Error syncing users file:", e)
 
         def new_user():
-            name = simpledialog.askstring("New User", "Enter Full Name:", parent=login_win)
+            name = simpledialog.askstring("New User", "Enter your Full Name:", parent=login_win)
             if name:
                 username = simpledialog.askstring("New User", "Enter Username:", parent=login_win)
                 if username:
+                    if not re.match("^[a-zA-Z0-9_.-]+$", username):
+                        messagebox.showerror("Invalid Username", "Username can only contain letters, numbers, and . - _", parent=login_win)
+                        return
                     if username in users:
-                        messagebox.showwarning("Warning", "Username already exists")
+                        messagebox.showwarning("Warning", "Username already exists", parent=login_win)
+                        return
+
+                    new_pass = simpledialog.askstring("Create Password", "Enter new password:", show='*', parent=login_win)
+                    if not new_pass: return
+                    confirm_pass = simpledialog.askstring("Create Password", "Confirm new password:", show='*', parent=login_win)
+                    if new_pass != confirm_pass:
+                        messagebox.showerror("Error", "Passwords do not match.", parent=login_win)
+                        return
+
+                    salt = os.urandom(16)
+                    salt_b64 = base64.urlsafe_b64encode(salt).decode('utf-8')
+                    hashed_password = self._hash_password(new_pass, salt)
+
+                    if not users: # First user is owner
+                        users[username] = {"full_name": name, "salt": salt_b64, "hash": hashed_password, "is_owner": True}
                     else:
-                        users[username] = name
-                        with open('users.json', 'w') as f:
-                            json.dump(users, f)
-                        user_combo['values'] = list(users.keys())
-                        user_var.set(username)
-                        if self.drive_sync:
-                            try:
-                                self.drive_sync.sync_up(['users.json'])
-                            except Exception as e:
-                                print("Error syncing users file:", e)
+                        users[username] = {"full_name": name, "salt": salt_b64, "hash": hashed_password}
+                    _save_users_and_sync(users)
+                    user_listbox.insert(tk.END, username)
         
         ttk.Button(login_win, text="Login", command=login).pack(pady=(10, 5))
         ttk.Button(login_win, text="Create New User", command=new_user).pack(pady=5)
@@ -291,16 +488,15 @@ class QuariumDashboard:
         self.root.wait_window(login_win)
         
         if not self.current_user:
-            self.root.destroy()
+            self.root.after(0, self.root.destroy)
             
     def check_and_acquire_lock(self):
         if not self.drive_sync:
-            self.finish_init()
+            self.root.after(0, self.finish_init)
             return
             
-        self._show_progress_dialog("Checking Status", "Checking online database status...")
+        self.update_splash("Checking online database status...", 80)
         lock_data = self.drive_sync.read_lock()  # type: ignore
-        self._hide_progress_dialog()
         
         now = time.time()
         if lock_data and lock_data.get('owner') and (now - lock_data.get('last_active', 0) < 45):
@@ -309,7 +505,7 @@ class QuariumDashboard:
                 self.do_sync_down_and_finish(read_only=False)
                 return
                 
-            res = messagebox.askyesnocancel("Database in Use", 
+            res = self.ask_on_main_thread(messagebox.askyesnocancel, "Database in Use", 
                 f"User '{owner}' is currently editing the database.\n\n"
                 "Do you want to request editing permissions? (They will have 15 seconds to respond).\n\n"
                 "Select 'No' to immediately open a Read-Only copy.")
@@ -319,10 +515,61 @@ class QuariumDashboard:
             elif res is False:
                 self.do_sync_down_and_finish(read_only=True)
             else:
-                self.root.destroy()
+                self.root.after(0, self.root.destroy)
         else:
             self.do_sync_down_and_finish(read_only=False)
+            # **Fix:** Implement a "write-then-verify" strategy to prevent race conditions.
+            # After acquiring the lock, wait a moment and check if another user also acquired it.
+            # If so, the user with the lexicographically smaller name backs off.
+            time.sleep(secrets.randbelow(2000) / 1000.0 + 1.0) # Wait 1-3 seconds
             
+            lock_data = self.drive_sync.read_lock() # type: ignore
+            if lock_data and lock_data.get('owner') and lock_data.get('owner') != self.current_user:
+                # Another user grabbed the lock in the small window. We must resolve who keeps it.
+                other_user = lock_data.get('owner')
+                if self.current_user > other_user:
+                    # This user's name comes later alphabetically, so they back off.
+                    self.is_owner = False
+                    self.stop_poller = True
+                    self.root.after(0, self._notify_lock_lost)
+                    messagebox.showwarning("Conflict Detected", 
+                        f"Both you and '{other_user}' tried to edit at the same time.\n\n"
+                        "To prevent data loss, you have been placed in Read-Only mode.")
+                    return
+            
+    def _record_local_file_mod_times(self):
+        """Records the modification times of local database files after a sync."""
+        self.local_file_mod_times.clear()
+        for f in self.db_files:
+            if os.path.exists(f):
+                try:
+                    self.local_file_mod_times[f] = os.path.getmtime(f)
+                except OSError:
+                    pass
+
+    def _conditional_sync_down(self, files_to_sync):
+        """Downloads files only if the cloud version is newer than the local version."""
+        if not self.drive_sync:
+            return
+
+        files_in_drive = self.drive_sync.list_appdata_files()
+        for name in files_to_sync:
+            if name in files_in_drive:
+                cloud_mod_time_str = files_in_drive[name].get('modifiedTime')
+                if not cloud_mod_time_str:
+                    self.drive_sync.download_file(files_in_drive[name]['id'], name)
+                    continue
+
+                # Compare modification times
+                if os.path.exists(name):
+                    local_mod_time = os.path.getmtime(name)
+                    cloud_mod_time = time.mktime(time.strptime(cloud_mod_time_str, "%Y-%m-%dT%H:%M:%S.%fZ"))
+                    
+                    # If cloud is newer by more than a small margin (e.g., 2 seconds)
+                    if cloud_mod_time > local_mod_time + 2:
+                        self.drive_sync.download_file(files_in_drive[name]['id'], name)
+                else: # File doesn't exist locally, so download it
+                    self.drive_sync.download_file(files_in_drive[name]['id'], name)
 
     def do_sync_down_and_finish(self, read_only=False):
         ui_exists = bool(self.frames)
@@ -331,12 +578,13 @@ class QuariumDashboard:
                 try:
                     if hasattr(app, 'conn'): app.conn.close()
                 except Exception: pass
-                
-        self._show_progress_dialog("Syncing", "Downloading latest databases...")
-        if self.drive_sync:
-            try: self.drive_sync.sync_down(self.db_files)  # type: ignore
-            except Exception as e: print("Sync down error:", e)
-        self._hide_progress_dialog()
+
+        self.update_splash("Downloading latest databases...", 90)
+        try: self._conditional_sync_down(self.db_files)
+        except Exception as e: print("Sync down error:", e)
+        
+        # Record the state of files after download to check for changes later
+        self._record_local_file_mod_times()
         
         if ui_exists:
             old_view = self.current_view.get()
@@ -352,10 +600,21 @@ class QuariumDashboard:
         if not read_only:
             self.acquire_lock()
         else:
-            if not self.frames: self.finish_init()
+            if not self.frames: self.root.after(0, self.finish_init)
             self.enforce_read_only_mode()
             if not ui_exists:
-                messagebox.showinfo("Read-Only", "You are now in Read-Only mode. Edits cannot be saved.")
+                self.root.after(0, lambda: messagebox.showinfo("Read-Only", "You are now in Read-Only mode. Edits cannot be saved."))
+
+    def ask_on_main_thread(self, func, *args, **kwargs):
+        """Helper to run a messagebox from a background thread."""
+        result = [None]
+        event = threading.Event()
+        def run_it():
+            result[0] = func(*args, **kwargs)
+            event.set()
+        self.root.after(0, run_it)
+        event.wait()
+        return result[0]
 
     def _notify_lock_lost(self):
         self.enforce_read_only_mode()
@@ -366,7 +625,7 @@ class QuariumDashboard:
             ld = {"owner": self.current_user, "last_active": time.time(), "request_by": None, "response": None}
             self.drive_sync.write_lock(ld)  # type: ignore
         self.is_owner = True
-        if not self.frames: self.finish_init()
+        if not self.frames: self.root.after(0, self.finish_init)
         else: self.enable_read_write_mode()
         self.start_lock_poller()
 
@@ -417,7 +676,7 @@ class QuariumDashboard:
                 if getattr(self, 'stop_poller', False): break
                 try:
                     ld = self.drive_sync.read_lock()  # type: ignore
-                        if not ld or ld.get('owner') != self.current_user:
+                    if not ld or ld.get('owner') != self.current_user:
                             self.is_owner = False
                             self.root.after(0, self._notify_lock_lost)
                             break
@@ -529,8 +788,11 @@ class QuariumDashboard:
                 self.request_lock(owner)
         else:
             self.do_sync_down_and_finish(read_only=False)
-            
+
     def finish_init(self):
+        if hasattr(self, 'splash') and self.splash.winfo_exists():
+            self.splash.destroy()
+
         self.root.deiconify() # Show main window
         
         window_width = 1200
@@ -661,7 +923,9 @@ class QuariumDashboard:
                 if self.logo_img.width() > 150:
                     factor = max(1, self.logo_img.width() // 120)
                     self.logo_img = self.logo_img.subsample(factor, factor)
-            ttk.Label(sidebar, image=self.logo_img).pack(pady=(10, 5))
+            sidebar_logo_label = ttk.Label(sidebar, image=self.logo_img)
+            sidebar_logo_label.image = self.logo_img # Keep a reference
+            sidebar_logo_label.pack(pady=(10, 5))
         
         # Application title in sidebar
         ttk.Label(sidebar, text="Quarium\nDashboard", font=('Helvetica', 16, 'bold'), justify="center").pack(pady=(0, 10))
@@ -680,7 +944,8 @@ class QuariumDashboard:
         # Define apps to load
         app_definitions = [
             ("Projects", "Project Manager", ProjectManager, {'current_user': self.current_user}),
-            ("Flow", "Project Flow", ProjectFlowManager, {'current_user': self.current_user}),
+            ("Flow", "Project Flow", ProjectFlowManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
+            ("Contracts", "Contract Generator", ContractManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
             ("Clients", "Client Manager", ClientManager, {'current_user': self.current_user}),
             ("Services", "Service Manager", ServiceManager, {'current_user': self.current_user}),
             ("Stock", "Stock Manager", StockManager, {'on_edit_composite': self.open_composite_editor, 'current_user': self.current_user}),
@@ -713,6 +978,10 @@ class QuariumDashboard:
             else:
                 self.apps[app_id] = app_class(frame)
             
+        # Link dependencies between managers
+        if "Projects" in self.apps and "Flow" in self.apps:
+            self.apps["Projects"].project_flow_manager = self.apps["Flow"]
+
         # Bottom buttons
         ttk.Button(sidebar, text="Quit", command=self.on_closing).pack(side="bottom", fill="x", pady=(0, 5))
         ttk.Button(sidebar, text="Log Out", command=self.logout).pack(side="bottom", fill="x", pady=(5, 5))
@@ -728,29 +997,44 @@ class QuariumDashboard:
         if hasattr(comp_app, 'load_composite'):
             comp_app.load_composite(composite_name)
             
-    def _show_progress_dialog(self, title, message):
+    def _show_progress_dialog(self, title, message, mode='indeterminate', max_value=100):
         self.progress_dialog = tk.Toplevel(self.root)
         self.progress_dialog.title(title)
         self.progress_dialog.transient(self.root)
         self.progress_dialog.grab_set()
         self.progress_dialog.resizable(False, False)
-        self.progress_dialog.update_idletasks() # Ensure dialog is ready for geometry calculation
+        self.progress_dialog.minsize(400, 120) # Increased minsize for more text room
+
+        # Use a frame to better contain the widgets
+        container = ttk.Frame(self.progress_dialog, padding=10)
+        container.pack(fill="both", expand=True)
         
+        # Increased wraplength to match new minsize width
+        self.progress_dialog_label = ttk.Label(container, text=message, wraplength=350, justify="center")
+        self.progress_dialog_label.pack(pady=(5, 10))
+        self.progress_bar = ttk.Progressbar(container, mode=mode, length=350, maximum=max_value)
+        self.progress_bar.pack(pady=(10, 5))
+        if mode == 'indeterminate':
+            self.progress_bar.start()
+
+        self.progress_dialog.update_idletasks()
         # Center the dialog
         x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (self.progress_dialog.winfo_width() // 2)
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (self.progress_dialog.winfo_height() // 2)
         self.progress_dialog.geometry(f"+{x}+{y}")
+        self.root.update_idletasks()
 
-        ttk.Label(self.progress_dialog, text=message, padding=10).pack()
-        self.progress_bar = ttk.Progressbar(self.progress_dialog, mode='indeterminate', length=200)
-        self.progress_bar.pack(pady=10, padx=10)
-        self.progress_bar.start()
-        self.progress_dialog.update_idletasks() # Ensure widgets are drawn inside dialog
-        self.root.update_idletasks() # Ensure main window updates and dialog is visible
+    def _update_progress_dialog(self, text, value):
+        if hasattr(self, 'progress_dialog') and self.progress_dialog.winfo_exists():
+            self.progress_dialog_label.config(text=text)
+            self.progress_bar['value'] = value
+            self.progress_dialog.update_idletasks()
+            self.progress_dialog.update() # Force a redraw
 
     def _hide_progress_dialog(self):
         if hasattr(self, 'progress_dialog') and self.progress_dialog.winfo_exists():
-            self.progress_bar.stop()
+            if self.progress_bar['mode'] == 'indeterminate':
+                self.progress_bar.stop()
             self.progress_dialog.destroy()
 
     def switch_view(self):
@@ -779,6 +1063,8 @@ class QuariumDashboard:
             app.load_all_data()
         elif view_id == "Flow":
             app.load_data()
+        elif view_id == "Contracts":
+            app.load_approved_projects()
         elif view_id == "Stock":
             app.refresh_tree()
         elif view_id == "Composites":
@@ -854,40 +1140,62 @@ class QuariumDashboard:
         self.root.after(100, self._perform_logout)
 
     def _perform_closing(self):
+        self._update_progress_dialog("Closing application modules...", 20)
         # Gracefully close all embedded apps
         for app in self.apps.values():
             if hasattr(app, 'on_closing'):
                 app.on_closing()
             elif hasattr(app, 'close'):
                 app.close()
+        self.root.after(50) # Give UI a moment to process
 
         self.stop_poller = True
         if getattr(self, 'is_owner', False) and self.drive_sync:
+            self._update_progress_dialog("Releasing online lock...", 40)
             try:
                 ld = self.drive_sync.read_lock() or {}  # type: ignore
                 if ld.get('owner') == self.current_user:
                     ld['owner'] = None
                     self.drive_sync.write_lock(ld)  # type: ignore
             except Exception: pass
+        self.root.after(50)
 
         # Upload databases back to drive
         if self.drive_sync:
-            try:
-                self.drive_sync.sync_up(self.db_files)  # type: ignore
-            except Exception as e:
-                print("Could not sync databases back to Google Drive:", e)
+            files_to_upload = []
+            for f in self.db_files:
+                if os.path.exists(f):
+                    try:
+                        current_mtime = os.path.getmtime(f)
+                        if self.local_file_mod_times.get(f) != current_mtime:
+                            files_to_upload.append(f)
+                    except OSError:
+                        # If we can't get mtime, assume it needs upload
+                        files_to_upload.append(f)
+            
+            if files_to_upload:
+                self._update_progress_dialog(f"Syncing {len(files_to_upload)} changed file(s) to cloud...", 60)
+                try:
+                    self.drive_sync.sync_up(files_to_upload, self.current_user)  # type: ignore
+                except Exception as e:
+                    print("Could not sync databases back to Google Drive:", e)
+            else:
+                self._update_progress_dialog("No local changes detected. Skipping cloud sync.", 80)
+                time.sleep(1) # Give user time to read the message
+        self.root.after(50)
 
+        self._update_progress_dialog("Finishing...", 100)
         self._hide_progress_dialog()
         self.root.destroy()
 
     def on_closing(self):
-        self._show_progress_dialog("Closing Application", "Saving data and closing connections...")
+        self._show_progress_dialog("Closing Application", "Saving data and closing connections...", mode='determinate')
         self.root.after(100, self._perform_closing)
 
     def open_settings(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Settings")
-        dialog.geometry("650x500")
+        dialog.geometry("800x600")
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -931,6 +1239,10 @@ class QuariumDashboard:
         users_frame = ttk.Frame(notebook, padding=10)
         notebook.add(users_frame, text="Users")
 
+        pass_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(pass_frame, text="Passwords")
+
+        # --- Users Tab ---
         user_tree = ttk.Treeview(users_frame, columns=("Full Name",), height=8)
         user_tree.heading("#0", text="Username")
         user_tree.heading("Full Name", text="Full Name")
@@ -943,19 +1255,21 @@ class QuariumDashboard:
             try:
                 with open('users.json', 'r') as f:
                     users_dict = json.load(f)
-                for uname, fname in users_dict.items():
+                for uname, udata in users_dict.items():
+                    fname = udata.get("full_name", udata) if isinstance(udata, dict) else udata
                     user_tree.insert("", "end", text=uname, values=(fname,))
             except Exception: pass
 
         def _save_users(u_dict):
             with open('users.json', 'w') as f:
-                json.dump(u_dict, f)
+                json.dump(u_dict, f, indent=2)
             if self.drive_sync:
                 try: self.drive_sync.sync_up(['users.json'])
                 except Exception: pass
             for item in user_tree.get_children():
                 user_tree.delete(item)
-            for uname, fname in u_dict.items():
+            for uname, udata in u_dict.items():
+                fname = udata.get("full_name", udata) if isinstance(udata, dict) else udata
                 user_tree.insert("", "end", text=uname, values=(fname,))
             messagebox.showinfo("Saved", "Users updated.", parent=dialog)
 
@@ -963,7 +1277,7 @@ class QuariumDashboard:
             sel = user_tree.selection()
             if not sel: return
             old_uname = user_tree.item(sel[0], "text")
-            old_fname = user_tree.item(sel[0], "values")[0]
+            old_fname = users_dict[old_uname].get("full_name", users_dict[old_uname])
             
             new_fname = simpledialog.askstring("Edit User", "Full Name:", initialvalue=old_fname, parent=dialog)
             if new_fname is None: return
@@ -974,8 +1288,13 @@ class QuariumDashboard:
                 messagebox.showerror("Error", "Username already exists!", parent=dialog)
                 return
                 
+            udata = users_dict[old_uname]
             del users_dict[old_uname]
-            users_dict[new_uname] = new_fname
+            if isinstance(udata, dict):
+                udata["full_name"] = new_fname
+                users_dict[new_uname] = udata
+            else: # Handle migration of old format if somehow missed
+                users_dict[new_uname] = new_fname
             _save_users(users_dict)
 
         def add_user():
@@ -986,13 +1305,96 @@ class QuariumDashboard:
             if new_uname in users_dict:
                 messagebox.showerror("Error", "Username already exists!", parent=dialog)
                 return
-            users_dict[new_uname] = new_fname
+            
+            messagebox.showinfo("Password Required", "A password must be set for the new user.", parent=dialog)
+            new_pass = simpledialog.askstring("Create Password", "Enter new password:", show='*', parent=dialog)
+            if not new_pass: return
+            confirm_pass = simpledialog.askstring("Create Password", "Confirm new password:", show='*', parent=dialog)
+            if new_pass != confirm_pass:
+                messagebox.showerror("Error", "Passwords do not match.", parent=dialog)
+                return
+
+            salt = os.urandom(16)
+            salt_b64 = base64.urlsafe_b64encode(salt).decode('utf-8')
+            hashed_password = self._hash_password(new_pass, salt)
+            users_dict[new_uname] = {"full_name": new_fname, "salt": salt_b64, "hash": hashed_password}
             _save_users(users_dict)
 
         u_btn_frame = ttk.Frame(users_frame)
         u_btn_frame.pack(fill="x", pady=5)
         ttk.Button(u_btn_frame, text="Add User", command=add_user).pack(side="left", padx=5)
         ttk.Button(u_btn_frame, text="Edit Selected", command=edit_user).pack(side="left", padx=5)
+
+        # --- Passwords Tab ---
+        my_pass_frame = ttk.LabelFrame(pass_frame, text="Change My Password", padding=10)
+        my_pass_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(my_pass_frame, text="Current Password:").grid(row=0, column=0, sticky="w", pady=2)
+        current_pass_var = tk.StringVar()
+        ttk.Entry(my_pass_frame, textvariable=current_pass_var, show="*").grid(row=0, column=1, padx=5, pady=2)
+        
+        ttk.Label(my_pass_frame, text="New Password:").grid(row=1, column=0, sticky="w", pady=2)
+        new_pass_var = tk.StringVar()
+        ttk.Entry(my_pass_frame, textvariable=new_pass_var, show="*").grid(row=1, column=1, padx=5, pady=2)
+        
+        ttk.Label(my_pass_frame, text="Confirm New Password:").grid(row=2, column=0, sticky="w", pady=2)
+        confirm_pass_var = tk.StringVar()
+        ttk.Entry(my_pass_frame, textvariable=confirm_pass_var, show="*").grid(row=2, column=1, padx=5, pady=2)
+
+        def change_my_password():
+            current_pass = current_pass_var.get()
+            new_pass = new_pass_var.get()
+            confirm_pass = confirm_pass_var.get()
+            
+            my_data = users_dict.get(self.current_user)
+            if not my_data or not isinstance(my_data, dict) or not self._verify_password(my_data.get("hash"), my_data.get("salt"), current_pass):
+                messagebox.showerror("Error", "Current password is incorrect.", parent=dialog)
+                return
+            if not new_pass or new_pass != confirm_pass:
+                messagebox.showerror("Error", "New passwords do not match.", parent=dialog)
+                return
+            
+            salt = os.urandom(16)
+            my_data["salt"] = base64.urlsafe_b64encode(salt).decode('utf-8')
+            my_data["hash"] = self._hash_password(new_pass, salt)
+            _save_users(users_dict)
+            current_pass_var.set(""); new_pass_var.set(""); confirm_pass_var.set("")
+            messagebox.showinfo("Success", "Your password has been changed.", parent=dialog)
+
+        ttk.Button(my_pass_frame, text="Change Password", command=change_my_password).grid(row=3, column=1, sticky="e", pady=10)
+
+        # --- Admin Reset Frame (only visible to owner) ---
+        my_user_data = users_dict.get(self.current_user, {})
+        if my_user_data.get("is_owner"):
+            admin_frame = ttk.LabelFrame(pass_frame, text="Reset User Password (Owner)", padding=10)
+            admin_frame.pack(fill="x", pady=15)
+            
+            ttk.Label(admin_frame, text="Select user to reset:").pack(anchor="w")
+            other_users = [u for u in users_dict.keys() if u != self.current_user]
+            reset_user_var = tk.StringVar()
+            reset_combo = ttk.Combobox(admin_frame, textvariable=reset_user_var, values=other_users, state="readonly")
+            reset_combo.pack(anchor="w", pady=5)
+            
+            def reset_password():
+                user_to_reset = reset_user_var.get()
+                if not user_to_reset: return
+                
+                temp_pass = secrets.token_urlsafe(8)
+                
+                salt = os.urandom(16)
+                udata = users_dict[user_to_reset]
+                if not isinstance(udata, dict):
+                    messagebox.showerror("Error", "Cannot reset password for a user who has not set one up yet.", parent=dialog)
+                    return
+
+                udata["salt"] = base64.urlsafe_b64encode(salt).decode('utf-8')
+                udata["hash"] = self._hash_password(temp_pass, salt)
+                _save_users(users_dict)
+                
+                messagebox.showinfo("Password Reset", f"Password for '{user_to_reset}' has been reset.\n\nTheir new temporary password is:\n\n{temp_pass}\n\nPlease share this with them securely.", parent=dialog)
+                reset_user_var.set("")
+
+            ttk.Button(admin_frame, text="Reset Password", command=reset_password).pack(anchor="w", pady=10)
 
         taxes_frame = ttk.Frame(notebook, padding=10)
         notebook.add(taxes_frame, text="Taxes")
@@ -1142,6 +1544,62 @@ class QuariumDashboard:
             self.logout_no_sync()
             
         ttk.Button(conn_frame, text="Disconnect from Company", command=do_disconnect, style="Accent.TButton").pack(pady=10)
+
+        # --- Contract Info Tab ---
+        contract_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(contract_frame, text="Contract Info")
+
+        ttk.Label(contract_frame, text="Enter your company's information for contract generation.", wraplength=500).pack(pady=(0, 10), anchor="w")
+
+        contract_info = settings.get("contract_info", {})
+        contract_vars = {}
+
+        fields = [
+            ("Company Full Name", "company_name", "Quarium Consultoria em Biologia Analítica LTDA"),
+            ("Company CNPJ", "company_cnpj", "53.429.415/0001-41"),
+            ("Company Address", "company_address", "Rua Maria Bicego, 323, Vila Santa Isabel, Campinas, SP. CEP: 13084-639"),
+            ("Legal Representative Name", "rep_name", "Lícia Carla da Silva Costa"),
+            ("Representative Nationality", "rep_nationality", "Brasileira"),
+            ("Representative Marital Status", "rep_marital_status", "Solteira"),
+            ("Representative Profession", "rep_profession", "Bióloga"),
+            ("Representative ID (RG)", "rep_id", "56.727.423-8"),
+            ("Representative ID Issuer", "rep_id_issuer", "SSP/SP"),
+            ("Representative CPF", "rep_cpf", "086.388.957-39")
+        ]
+
+        form_frame = ttk.Frame(contract_frame)
+        form_frame.pack(fill="x")
+
+        for i, (label, key, default) in enumerate(fields):
+            ttk.Label(form_frame, text=f"{label}:").grid(row=i, column=0, sticky="w", pady=2, padx=5)
+            var = tk.StringVar(value=contract_info.get(key, default))
+            ttk.Entry(form_frame, textvariable=var, width=50).grid(row=i, column=1, sticky="ew", pady=2, padx=5)
+            contract_vars[key] = var
+
+        form_frame.columnconfigure(1, weight=1)
+
+        def save_contract_info():
+            new_info = {}
+            for key, var in contract_vars.items():
+                new_info[key] = var.get()
+            
+            settings["contract_info"] = new_info
+            with open(settings_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            if self.drive_sync:
+                try:
+                    self.drive_sync.sync_up(['settings.json'])
+                except Exception as e:
+                    messagebox.showwarning("Sync Warning", f"Could not sync settings.json to cloud: {e}", parent=dialog)
+            
+            messagebox.showinfo("Saved", "Contract information saved successfully.", parent=dialog)
+            
+            # Refresh the contract manager if it's open
+            if "Contracts" in self.apps:
+                self.apps["Contracts"].load_settings()
+
+        ttk.Button(contract_frame, text="Save Contract Info", command=save_contract_info).pack(pady=15)
 
         conflicts_frame = ttk.Frame(notebook, padding=10)
         notebook.add(conflicts_frame, text="Sync Conflicts")

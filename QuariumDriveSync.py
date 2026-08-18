@@ -3,6 +3,8 @@ import io
 import json
 import threading
 from datetime import datetime
+import time
+import ssl
 
 try:
     from google.oauth2.credentials import Credentials
@@ -10,7 +12,7 @@ try:
     from google.auth.transport.requests import Request
     from google.auth.exceptions import RefreshError
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+    from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     from unittest.mock import MagicMock
@@ -22,6 +24,7 @@ except ImportError:
     build = MagicMock()
     MediaIoBaseDownload = MagicMock()
     MediaFileUpload = MagicMock()
+    MediaIoBaseUpload = MagicMock()
 
 SCOPES = ['https://www.googleapis.com/auth/drive.appdata']
 
@@ -77,38 +80,57 @@ class DriveSyncManager:
             try:
                 files = self.list_appdata_files()
                 if 'lock.json' in files:
-                    file_id = files['lock.json']['id'] if isinstance(files['lock.json'], dict) else files['lock.json']
-                    request = self.service.files().get_media(fileId=file_id)  # type: ignore
-                    fh = io.BytesIO()
-                    downloader = MediaIoBaseDownload(fh, request)
-                    done = False
-                    while not done: _, done = downloader.next_chunk()
-                    return json.loads(fh.getvalue().decode('utf-8'))
+                    file_id = files['lock.json']['id']
+                    content = self._download_to_memory(file_id)
+                    if content:
+                        return json.loads(content.decode('utf-8'))
             except Exception as e: print("Read lock error:", e)
             return None
 
     def write_lock(self, lock_data):
         with self.api_lock:
             try:
-                with open('temp_lock.json', 'w') as f: json.dump(lock_data, f)
+                # Use an in-memory file to avoid WinError 32 on os.remove
+                fh = io.BytesIO(json.dumps(lock_data).encode('utf-8'))
+                media = MediaIoBaseUpload(fh, mimetype='application/json', resumable=True)
+
                 files = self.list_appdata_files()
-                media = MediaFileUpload('temp_lock.json', mimetype='application/json', resumable=True)
                 if 'lock.json' in files:
-                    file_id = files['lock.json']['id'] if isinstance(files['lock.json'], dict) else files['lock.json']
+                    file_id = files['lock.json']['id']
                     self.service.files().update(fileId=file_id, media_body=media).execute()  # type: ignore
                 else:
                     file_metadata = {'name': 'lock.json', 'parents': ['appDataFolder']}
                     self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()  # type: ignore
-                os.remove('temp_lock.json')
             except Exception as e: print("Write lock error:", e)
 
+    def _download_to_memory(self, file_id):
+        """Downloads a file's content into memory with retry logic for SSL errors."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                request = self.service.files().get_media(fileId=file_id)  # type: ignore
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                return fh.getvalue()
+            except ssl.SSLError as e:
+                print(f"SSL Error during download (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    sleep_time = 2 ** attempt
+                    print(f"Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    print("Download failed after multiple retries due to SSL errors.")
+                    raise
+        return None
+
     def download_file(self, file_id, file_path):
-        request = self.service.files().get_media(fileId=file_id)  # type: ignore
-        with io.FileIO(file_path, 'wb') as fh:
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
+        content = self._download_to_memory(file_id)
+        if content:
+            with open(file_path, 'wb') as f:
+                f.write(content)
 
     def upload_file(self, file_path, file_name, file_id=None):
         media = MediaFileUpload(file_path, resumable=True)

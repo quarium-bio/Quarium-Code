@@ -7,9 +7,10 @@ from datetime import datetime, timedelta
 import math
 
 class ProjectFlowManager:
-    def __init__(self, root, current_user="Unknown"):
+    def __init__(self, root, current_user="Unknown", drive_sync=None):
         self.root = root
         self.current_user = current_user
+        self.drive_sync = drive_sync # Not used here, but good practice to accept it
         self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'projects.db')
         self.service_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'services.db')
         self.stock_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock.db')

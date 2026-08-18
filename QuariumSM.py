@@ -214,8 +214,6 @@ class StockManager:
             self.conn.close()
         except Exception:
             pass
-        if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.destroy()
 
     def update_composite_prices(self):
         try:

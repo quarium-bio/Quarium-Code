@@ -37,7 +37,10 @@ class ClientManager:
                 name TEXT NOT NULL UNIQUE,
                 code INTEGER NOT NULL UNIQUE,
                 created_at TEXT,
-                updated_by TEXT
+                updated_by TEXT,
+                cnpj TEXT,
+                address TEXT,
+                is_legal_entity INTEGER DEFAULT 0
             )
         ''')
 
@@ -54,7 +57,14 @@ class ClientManager:
                 company_id INTEGER,
                 created_at TEXT,
                 updated_at TEXT,
+                cpf TEXT,
+                rg TEXT,
+                rg_issuer TEXT,
+                nationality TEXT,
+                marital_status TEXT,
+                profession TEXT,
                 updated_by TEXT,
+                title TEXT,
                 FOREIGN KEY (company_id) REFERENCES companies (id) ON DELETE SET NULL
             )
         ''')
@@ -67,6 +77,22 @@ class ClientManager:
             self.cursor.execute('ALTER TABLE clients ADD COLUMN updated_by TEXT')
             try: self.cursor.execute('ALTER TABLE companies ADD COLUMN updated_by TEXT')
             except: pass
+        
+        # Add new fields for contract generation
+        new_client_cols = ['cpf', 'rg', 'rg_issuer', 'nationality', 'marital_status', 'profession']
+        for col in new_client_cols:
+            if col not in client_columns:
+                self.cursor.execute(f'ALTER TABLE clients ADD COLUMN {col} TEXT')
+        if 'title' not in client_columns:
+            self.cursor.execute('ALTER TABLE clients ADD COLUMN title TEXT')
+
+        self.cursor.execute("PRAGMA table_info(companies)")
+        company_columns = [column[1] for column in self.cursor.fetchall()]
+        new_company_cols = ['cnpj', 'address', 'is_legal_entity']
+        for col in new_company_cols:
+            if col not in company_columns:
+                self.cursor.execute(f'ALTER TABLE companies ADD COLUMN {col} TEXT' if col != 'is_legal_entity' else 'ALTER TABLE companies ADD COLUMN is_legal_entity INTEGER DEFAULT 0')
+
 
         self.conn.commit()
 
@@ -104,34 +130,93 @@ class ClientManager:
         info_frame = ttk.Frame(right_panel)
         info_frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(info_frame, text="Client Name * :").grid(row=0, column=0, sticky="w", pady=5)
+        # --- Client Type Radio Buttons ---
+        type_frame = ttk.Frame(info_frame)
+        type_frame.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        self.client_type_var = tk.StringVar(value="PF")
+        pf_radio = ttk.Radiobutton(type_frame, text="Pessoa Física (Individual)", variable=self.client_type_var, value="PF", command=self.toggle_client_type_fields)
+        pf_radio.pack(side="left", padx=5)
+        pj_radio = ttk.Radiobutton(type_frame, text="Pessoa Jurídica (Company)", variable=self.client_type_var, value="PJ", command=self.toggle_client_type_fields)
+        pj_radio.pack(side="left", padx=5)
+
+        ttk.Label(info_frame, text="Title (e.g., Dr., Ms.):").grid(row=1, column=0, sticky="w", pady=5)
+        self.title_var = tk.StringVar()
+        ttk.Entry(info_frame, textvariable=self.title_var, width=10).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        ttk.Label(info_frame, text="Client Name * :").grid(row=2, column=0, sticky="w", pady=5)
         self.name_var = tk.StringVar()
-        ttk.Entry(info_frame, textvariable=self.name_var, width=40).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Entry(info_frame, textvariable=self.name_var, width=40).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(info_frame, text="Client Email * :").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(info_frame, text="Client Email * :").grid(row=3, column=0, sticky="w", pady=5)
         self.email_var = tk.StringVar()
-        ttk.Entry(info_frame, textvariable=self.email_var, width=40).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        ttk.Entry(info_frame, textvariable=self.email_var, width=40).grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(info_frame, text="Phone Number:").grid(row=2, column=0, sticky="w", pady=5)
+        # --- Pessoa Física Fields ---
+        self.pf_widgets = []
+        self.pf_labels = []
+
+        self.pf_labels.append(ttk.Label(info_frame, text="CPF:"))
+        self.pf_labels[-1].grid(row=4, column=0, sticky="w", pady=5)
+        self.cpf_var = tk.StringVar()
+        self.pf_widgets.append(ttk.Entry(info_frame, textvariable=self.cpf_var, width=40))
+        self.pf_widgets[-1].grid(row=4, column=1, padx=5, pady=5, sticky="w")
+
+        self.pf_labels.append(ttk.Label(info_frame, text="RG:"))
+        self.pf_labels[-1].grid(row=5, column=0, sticky="w", pady=5)
+        self.rg_var = tk.StringVar()
+        self.pf_widgets.append(ttk.Entry(info_frame, textvariable=self.rg_var, width=20))
+        self.pf_widgets[-1].grid(row=5, column=1, padx=5, pady=5, sticky="w")
+
+        self.pf_labels.append(ttk.Label(info_frame, text="RG Issuer:"))
+        self.pf_labels[-1].grid(row=5, column=2, sticky="w", pady=5)
+        self.rg_issuer_var = tk.StringVar()
+        self.pf_widgets.append(ttk.Entry(info_frame, textvariable=self.rg_issuer_var, width=10))
+        self.pf_widgets[-1].grid(row=5, column=3, padx=5, pady=5, sticky="w")
+
+        self.pf_labels.append(ttk.Label(info_frame, text="Nationality:"))
+        self.pf_labels[-1].grid(row=6, column=0, sticky="w", pady=5)
+        self.nationality_var = tk.StringVar()
+        self.pf_widgets.append(ttk.Entry(info_frame, textvariable=self.nationality_var, width=40))
+        self.pf_widgets[-1].grid(row=6, column=1, padx=5, pady=5, sticky="w")
+
+        self.pf_labels.append(ttk.Label(info_frame, text="Marital Status:"))
+        self.pf_labels[-1].grid(row=7, column=0, sticky="w", pady=5)
+        self.marital_status_var = tk.StringVar()
+        marital_options = ["Solteiro(a)", "Casado(a)", "Divorciado(a)", "Viúvo(a)", "União Estável"]
+        self.marital_status_combo = ttk.Combobox(info_frame, textvariable=self.marital_status_var, values=marital_options, width=37) # This is also a widget
+        self.pf_widgets.append(self.marital_status_combo)
+        self.pf_widgets[-1].grid(row=7, column=1, padx=5, pady=5, sticky="w")
+
+        self.pf_labels.append(ttk.Label(info_frame, text="Profession:"))
+        self.pf_labels[-1].grid(row=8, column=0, sticky="w", pady=5)
+        self.profession_var = tk.StringVar()
+        self.pf_widgets.append(ttk.Entry(info_frame, textvariable=self.profession_var, width=40))
+        self.pf_widgets[-1].grid(row=8, column=1, padx=5, pady=5, sticky="w")
+
+        ttk.Label(info_frame, text="Phone Number:").grid(row=9, column=0, sticky="w", pady=5)
         self.phone_var = tk.StringVar()
-        ttk.Entry(info_frame, textvariable=self.phone_var, width=40).grid(row=2, column=1, padx=5, pady=5, sticky="w")
+        ttk.Entry(info_frame, textvariable=self.phone_var, width=40).grid(row=9, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(info_frame, text="Client Address:").grid(row=3, column=0, sticky="nw", pady=5)
+        ttk.Label(info_frame, text="Client Address:").grid(row=10, column=0, sticky="nw", pady=5) # This is for the company address
         self.address_text = tk.Text(info_frame, width=30, height=4,
                                     background="#F0F0F0", relief="flat", borderwidth=1)
-        self.address_text.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        self.address_text.grid(row=10, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(info_frame, text="Funding Code:").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(info_frame, text="Funding Code:").grid(row=11, column=0, sticky="w", pady=5)
         self.funding_code_var = tk.StringVar()
-        ttk.Entry(info_frame, textvariable=self.funding_code_var, width=40).grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        ttk.Entry(info_frame, textvariable=self.funding_code_var, width=40).grid(row=11, column=1, padx=5, pady=5, sticky="w")
 
         self.is_academic_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(info_frame, text="Academic Use", variable=self.is_academic_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=10)
+        ttk.Checkbutton(info_frame, text="Academic Use", variable=self.is_academic_var).grid(row=12, column=0, columnspan=2, sticky="w", pady=10)
 
         # Save button docked to bottom
         save_frame = ttk.Frame(right_panel)
         save_frame.pack(side="bottom", fill="x", pady=(10, 0))
         ttk.Button(save_frame, text="Save Client", command=self.save_client).pack(side="right", padx=5)
+
+        # Make the form expandable
+        info_frame.columnconfigure(1, weight=1)
+        info_frame.columnconfigure(3, weight=1)
 
         self.current_client_id = None
 
@@ -141,6 +226,18 @@ class ClientManager:
         self.tree.bind("<ButtonRelease-1>", self.on_drag_end)
         self.tree.bind("<B1-Motion>", self.on_drag_motion)
 
+        self.toggle_client_type_fields() # Set initial visibility
+
+    def toggle_client_type_fields(self):
+        """Shows or hides fields based on the client type radio button."""
+        if self.client_type_var.get() == "PF": # Pessoa Física
+            for widget in self.pf_widgets + self.pf_labels:
+                widget.grid()
+        else: # Pessoa Jurídica
+            for widget in self.pf_widgets + self.pf_labels:
+                widget.grid_remove()
+
+
     def load_clients(self):
         """Load all clients categorized by their companies"""
         for item in self.tree.get_children():
@@ -149,20 +246,23 @@ class ClientManager:
         # Load companies
         self.cursor.execute("SELECT id, name, code FROM companies ORDER BY name")
         for comp_id, name, code in self.cursor.fetchall():
-            node = self.tree.insert("", "end", text=f"{name} (Code: {code})", tags=("company", str(comp_id)), open=True)  # type: ignore
+            sanitized_name = name.replace('\n', ' ')
+            node = self.tree.insert("", "end", text=f"{sanitized_name} (Code: {code})", tags=("company", str(comp_id)), open=True)  # type: ignore
             
             # Load clients for this company
             self.cursor.execute("SELECT id, name, email, is_academic FROM clients WHERE company_id = ? ORDER BY name", (comp_id,))
             for client_id, c_name, c_email, is_acad in self.cursor.fetchall():
                 acad_text = "Yes" if is_acad else "No"
-                self.tree.insert(node, "end", text=c_name, values=(c_email, acad_text), tags=("client", str(client_id)))  # type: ignore
+                sanitized_c_name = c_name.replace('\n', ' ')
+                self.tree.insert(node, "end", text=sanitized_c_name, values=(c_email, acad_text), tags=("client", str(client_id)))  # type: ignore
 
         # Load uncategorized clients
         uncat_node = self.tree.insert("", "end", text="Uncategorized", tags=("company", ""), open=True)  # type: ignore
         self.cursor.execute("SELECT id, name, email, is_academic FROM clients WHERE company_id IS NULL ORDER BY name")
         for client_id, c_name, c_email, is_acad in self.cursor.fetchall():
             acad_text = "Yes" if is_acad else "No"
-            self.tree.insert(uncat_node, "end", text=c_name, values=(c_email, acad_text), tags=("client", str(client_id)))  # type: ignore
+            sanitized_c_name = c_name.replace('\n', ' ')
+            self.tree.insert(uncat_node, "end", text=sanitized_c_name, values=(c_email, acad_text), tags=("client", str(client_id)))  # type: ignore
 
     def add_client(self):
         """Prepare form for new client entry"""
@@ -257,6 +357,25 @@ class ClientManager:
         code_var = tk.StringVar(value=str(current_code))
         ttk.Entry(dialog, textvariable=code_var, width=25).grid(row=1, column=1, padx=10, pady=5)
 
+        # Add new fields for companies
+        self.cursor.execute("SELECT cnpj, address, is_legal_entity FROM companies WHERE id = ?", (company_id,))
+        comp_extra = self.cursor.fetchone()
+        cnpj, address, is_legal = comp_extra if comp_extra else ("", "", 0)
+
+        is_legal_var = tk.BooleanVar(value=bool(is_legal))
+        ttk.Checkbutton(dialog, text="Is a Legal Entity (for contracts)", variable=is_legal_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=5)
+
+        ttk.Label(dialog, text="CNPJ:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        cnpj_var = tk.StringVar(value=cnpj or "")
+        ttk.Entry(dialog, textvariable=cnpj_var, width=25).grid(row=3, column=1, padx=10, pady=5)
+
+        ttk.Label(dialog, text="Address:").grid(row=4, column=0, sticky="nw", padx=10, pady=5)
+        address_text = tk.Text(dialog, width=30, height=3)
+        address_text.grid(row=4, column=1, padx=10, pady=5)
+        if address:
+            address_text.insert("1.0", address)
+
+
         def save():
             new_name = name_var.get().strip()
             try:
@@ -269,8 +388,19 @@ class ClientManager:
                 messagebox.showerror("Error", "Company name is required", parent=dialog)
                 return
 
+            new_cnpj = cnpj_var.get().strip()
+            if new_cnpj and not self._is_valid_cnpj(new_cnpj):
+                messagebox.showerror("Invalid CNPJ", "The CNPJ entered is not valid. Please check the number.", parent=dialog)
+                return
+
+
+            new_cnpj = cnpj_var.get().strip()
+            new_address = address_text.get("1.0", tk.END).strip()
+            new_is_legal = 1 if is_legal_var.get() else 0
+
             try:
-                self.cursor.execute("UPDATE companies SET name = ?, code = ?, updated_by = ? WHERE id = ?", (new_name, new_code, self.current_user, company_id))
+                self.cursor.execute("UPDATE companies SET name = ?, code = ?, cnpj = ?, address = ?, is_legal_entity = ?, updated_by = ? WHERE id = ?", 
+                                    (new_name, new_code, new_cnpj, new_address, new_is_legal, self.current_user, company_id))
                 self.conn.commit()
                 self.load_clients()
                 dialog.destroy()
@@ -283,7 +413,7 @@ class ClientManager:
                 messagebox.showerror("Database Error", f"Could not update company: {e}", parent=dialog)
 
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
         ttk.Button(btn_frame, text="Save", command=save).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
 
@@ -324,13 +454,29 @@ class ClientManager:
 
     def load_client_to_form(self, client_id):
         """Load existing client details onto the UI inputs"""
-        self.cursor.execute("SELECT name, email, phone, address, funding_code, is_academic FROM clients WHERE id = ?", (client_id,))
+        self.cursor.execute("SELECT name, email, phone, address, funding_code, is_academic, cpf, rg, rg_issuer, nationality, marital_status, profession, title FROM clients WHERE id = ?", (client_id,))
         result = self.cursor.fetchone()
         if result:
-            name, email, phone, address, funding_code, is_academic = result
+            (name, email, phone, address, funding_code, is_academic, 
+             cpf, rg, rg_issuer, nationality, marital_status, profession, title) = result # type: ignore
             self.name_var.set(name)
             self.email_var.set(email)
+
+            # Determine client type based on whether CPF exists
+            if cpf:
+                self.client_type_var.set("PF")
+            else:
+                self.client_type_var.set("PJ")
+            self.toggle_client_type_fields()
+
+            self.cpf_var.set(cpf or "")
+            self.rg_var.set(rg or "")
+            self.rg_issuer_var.set(rg_issuer or "")
+            self.nationality_var.set(nationality or "")
+            self.marital_status_var.set(marital_status or "")
+            self.profession_var.set(profession or "")
             self.phone_var.set(phone or "")
+            self.title_var.set(title or "")
             self.address_text.delete("1.0", tk.END)
             if address:
                 self.address_text.insert(tk.END, address)
@@ -342,17 +488,36 @@ class ClientManager:
         """Persist UI Client form to DB"""
         name = self.name_var.get().strip()
         email = self.email_var.get().strip()
+        title = self.title_var.get().strip()
+
+        if self.client_type_var.get() == "PF":
+            cpf = self.cpf_var.get().strip()
+            rg = self.rg_var.get().strip()
+            rg_issuer = self.rg_issuer_var.get().strip()
+            nationality = self.nationality_var.get().strip()
+            marital_status = self.marital_status_var.get().strip()
+            profession = self.profession_var.get().strip()
+        else: # Clear PF fields if saving as PJ
+            cpf, rg, rg_issuer, nationality, marital_status, profession = "", "", "", "", "", ""
+
         phone = self.phone_var.get().strip()
         address = self.address_text.get("1.0", tk.END).strip()
         funding_code = self.funding_code_var.get().strip()
         is_academic = 1 if self.is_academic_var.get() else 0
 
-        if not name or not email:
-            messagebox.showerror("Error", "Name and Email are required")
+        
+
+        if not name:
+            messagebox.showerror("Error", "Client Name is required.")
+            return
+
+        # CPF validation
+        if cpf and not self._is_valid_cpf(cpf):
+            messagebox.showerror("Invalid CPF", "The CPF entered is not valid. Please check the number.")
             return
 
         # Email validation regex
-        if not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', email):
+        if email and not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', email):
             messagebox.showerror("Error", "Please enter a valid email address format")
             return
 
@@ -360,14 +525,16 @@ class ClientManager:
         try:
             if self.current_client_id:
                 self.cursor.execute('''
-                    UPDATE clients SET name = ?, email = ?, phone = ?, address = ?, funding_code = ?, is_academic = ?, updated_at = ?, updated_by = ?
+                    UPDATE clients SET name = ?, email = ?, phone = ?, address = ?, funding_code = ?, is_academic = ?, title = ?,
+                    cpf = ?, rg = ?, rg_issuer = ?, nationality = ?, marital_status = ?, profession = ?, updated_at = ?, updated_by = ?
                     WHERE id = ?
-                ''', (name, email, phone, address, funding_code, is_academic, now, self.current_user, self.current_client_id))
+                ''', (name, email, phone, address, funding_code, is_academic, title, cpf, rg, rg_issuer, nationality, marital_status, profession, now, self.current_user, self.current_client_id))
             else:
                 self.cursor.execute('''
-                    INSERT INTO clients (name, email, phone, address, funding_code, is_academic, created_at, updated_at, updated_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (name, email, phone, address, funding_code, is_academic, now, now, self.current_user))
+                    INSERT INTO clients (name, email, phone, address, funding_code, is_academic, title, cpf, rg, 
+                    rg_issuer, nationality, marital_status, profession, created_at, updated_at, updated_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, email, phone, address, funding_code, is_academic, title, cpf, rg, rg_issuer, nationality, marital_status, profession, now, now, self.current_user))
                 self.current_client_id = self.cursor.lastrowid
             
             self.conn.commit()
@@ -400,6 +567,14 @@ class ClientManager:
     def clear_form(self):
         self.name_var.set("")
         self.email_var.set("")
+        self.title_var.set("")
+        self.cpf_var.set("")
+        self.rg_var.set("")
+        self.rg_issuer_var.set("")
+        self.nationality_var.set("")
+        self.marital_status_var.set("")
+        self.profession_var.set("")
+        self.client_type_var.set("PF")
         self.phone_var.set("")
         self.address_text.delete("1.0", tk.END)
         self.funding_code_var.set("")
@@ -421,6 +596,7 @@ class ClientManager:
         if not hasattr(self, 'drag_item') or not self.drag_item:
             return
         current_item = self.tree.identify_row(event.y)
+        self.root.config(cursor="") # Reset cursor
         
         if hasattr(self, 'drag_highlight') and self.drag_highlight:
             self.tree.selection_remove(self.drag_highlight)
@@ -430,14 +606,17 @@ class ClientManager:
             if item_type == "company":
                 self.tree.item(current_item, open=True)
                 self.tree.selection_add(current_item)
+                self.root.config(cursor="plus")
                 self.drag_highlight = current_item
             elif item_type == "client" and current_item != self.drag_item:
                 self.tree.selection_add(current_item)
+                self.root.config(cursor="no")
                 self.drag_highlight = current_item
             else:
                 self.drag_highlight = None
         else:
             self.drag_highlight = None
+            self.root.config(cursor="no")
 
     def on_drag_end(self, event):
         if not hasattr(self, 'drag_item') or not self.drag_item:
@@ -446,6 +625,7 @@ class ClientManager:
         if hasattr(self, 'drag_highlight') and self.drag_highlight:
             self.tree.selection_remove(self.drag_highlight)
         
+        self.root.config(cursor="") # Reset cursor
         if hasattr(self, 'original_selection'):
             try:
                 item_type, _ = self.tree.item(self.original_selection[0], "tags") if self.original_selection else (None, None)
@@ -482,9 +662,51 @@ class ClientManager:
             self.conn.close()
         except Exception:
             pass
-        if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.destroy()
             
+    def _is_valid_cpf(self, cpf: str) -> bool:
+        """Validates a Brazilian CPF number."""
+        cpf = ''.join(re.findall(r'\d', cpf))
+
+        if not cpf or len(cpf) != 11 or len(set(cpf)) == 1:
+            return False
+
+        # Calculate first check digit
+        s = sum(int(cpf[i]) * (10 - i) for i in range(9))
+        d1 = (s * 10) % 11
+        if d1 == 10: d1 = 0
+        if d1 != int(cpf[9]):
+            return False
+
+        # Calculate second check digit
+        s = sum(int(cpf[i]) * (11 - i) for i in range(10))
+        d2 = (s * 10) % 11
+        if d2 == 10: d2 = 0
+        if d2 != int(cpf[10]):
+            return False
+
+        return True
+
+    def _is_valid_cnpj(self, cnpj: str) -> bool:
+        """Validates a Brazilian CNPJ number."""
+        cnpj = ''.join(re.findall(r'\d', cnpj))
+
+        if not cnpj or len(cnpj) != 14 or len(set(cnpj)) == 1:
+            return False
+
+        # Calculate first check digit
+        weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+        s = sum(int(cnpj[i]) * weights1[i] for i in range(12))
+        d1 = 11 - (s % 11)
+        if d1 >= 10: d1 = 0
+        if d1 != int(cnpj[12]): return False
+
+        # Calculate second check digit
+        weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+        s = sum(int(cnpj[i]) * weights2[i] for i in range(13))
+        d2 = 11 - (s % 11)
+        if d2 >= 10: d2 = 0
+        return d2 == int(cnpj[13])
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = ClientManager(root)

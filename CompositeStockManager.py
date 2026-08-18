@@ -468,8 +468,6 @@ class CompositeStockManager:
 
     def close(self):
         self.conn.close()
-        if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.destroy()
 
 
 if __name__ == '__main__':
