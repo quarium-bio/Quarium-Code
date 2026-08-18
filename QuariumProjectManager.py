@@ -454,8 +454,8 @@ class ProjectManager:
             try:
                 with open(self.users_json_path, 'r') as f:
                     users_dict = json.load(f)
-                    self.username_to_full = users_dict
-                    self.users_data = list(users_dict.values())
+                    self.username_to_full = {username: data.get('full_name', username) for username, data in users_dict.items()}
+                    self.users_data = list(self.username_to_full.values())
             except json.JSONDecodeError as e:
                 messagebox.showerror("Error", f"Could not load users.json: {e}")
         self.user_combobox['values'] = self.users_data
