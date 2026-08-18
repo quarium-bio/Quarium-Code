@@ -46,7 +46,7 @@ except ImportError:
     os.urandom = lambda x: b'x' * x 
 
 CURRENT_VERSION = "2.1.0"
-UPDATE_URL = "https://raw.githubusercontent.com/quarium-bio/bio-dashboard/main/version.json" # Change to your actual raw URL
+UPDATE_URL = "https://raw.githubusercontent.com/quarium-bio/Quarium-Code/main/version.json" # Change to your actual raw URL
 
 class QuariumDashboard:
     def __init__(self, root):
