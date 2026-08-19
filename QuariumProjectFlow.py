@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import sqlite3
 import tkinter as tk
@@ -6,14 +7,19 @@ from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime, timedelta
 import math
 
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+
 class ProjectFlowManager:
     def __init__(self, root, current_user="Unknown", drive_sync=None):
         self.root = root
         self.current_user = current_user
         self.drive_sync = drive_sync # Not used here, but good practice to accept it
-        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'projects.db')
-        self.service_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'services.db')
-        self.stock_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock.db')
+        self.db_path = os.path.join(_BASE_DIR, 'projects.db')
+        self.service_db_path = os.path.join(_BASE_DIR, 'services.db')
+        self.stock_db_path = os.path.join(_BASE_DIR, 'stock.db')
         
         self.stages = [
             (1, "Orçamento Aprovado"),
@@ -51,7 +57,7 @@ class ProjectFlowManager:
         self.conn.commit()
 
     def load_settings(self):
-        settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+        settings_path = os.path.join(_BASE_DIR, 'settings.json')
         settings = {"profit_margin": 0.0, "taxes_and_fees": 0.0}
         if os.path.exists(settings_path):
             try:
@@ -282,7 +288,7 @@ class ProjectFlowManager:
                 else:
                     def_name = self.current_user
                     try:
-                        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.json'), 'r') as f:
+                        with open(os.path.join(_BASE_DIR, 'users.json'), 'r') as f:
                             u_dict = json.load(f)
                             if self.current_user in u_dict:
                                 def_name = u_dict[self.current_user]

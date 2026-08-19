@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
@@ -9,6 +10,11 @@ import webbrowser
 import tempfile
 import json
 import threading
+
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
 try:
     import pythoncom
@@ -68,14 +74,14 @@ class ContractManager:
             self.root.title("Quarium Contract Manager")
             self.root.geometry("1000x700")
 
-        self.project_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'projects.db')
-        self.client_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clients.db')
-        self.shell_template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ContractShell.docx')
-        self.header_template_path_pf = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ContractHeader_PF.docx')
-        self.header_template_path_pj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ContractHeader_PJ.docx')
-        self.template_path_pf = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ContractTemplate_PF.docx')
-        self.template_path_pj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ContractTemplate_PJ.docx')
-        self.settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+        self.project_db_path = os.path.join(_BASE_DIR, 'projects.db')
+        self.client_db_path = os.path.join(_BASE_DIR, 'clients.db')
+        self.shell_template_path = os.path.join(_BASE_DIR, 'ContractShell.docx')
+        self.header_template_path_pf = os.path.join(_BASE_DIR, 'ContractHeader_PF.docx')
+        self.header_template_path_pj = os.path.join(_BASE_DIR, 'ContractHeader_PJ.docx')
+        self.template_path_pf = os.path.join(_BASE_DIR, 'ContractTemplate_PF.docx')
+        self.template_path_pj = os.path.join(_BASE_DIR, 'ContractTemplate_PJ.docx')
+        self.settings_path = os.path.join(_BASE_DIR, 'settings.json')
 
         self.placeholders = {
             "{{CLIENT_NAME}}": "Full name of the client.",
@@ -245,7 +251,7 @@ class ContractManager:
 
     def open_template_folder(self):
         """Opens the folder containing the contract template."""
-        webbrowser.open(os.path.dirname(os.path.abspath(__file__)))
+        webbrowser.open(_BASE_DIR)
 
     def get_project_data(self, project_id):
         data = {}
@@ -448,7 +454,7 @@ class ContractManager:
                 return
 
             # --- Add Custom Header Content ---
-            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'QLogo.png')
+            logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
             if os.path.exists(logo_path):
                 p_logo = header_insertion_point.insert_paragraph_before()
                 p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -576,7 +582,7 @@ class ContractManager:
         progress dialog meanwhile."""
         # Use the application's directory for the temporary file to avoid permission issues
         # with the system's temp folder. The '~' prefix marks it for easy identification.
-        temp_docx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"~temp_contract_{est_num}.docx")
+        temp_docx_path = os.path.join(_BASE_DIR, f"~temp_contract_{est_num}.docx")
         try:
             final_doc.save(temp_docx_path)
         except Exception as e:

@@ -1,10 +1,16 @@
 import os
 import re
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 from datetime import datetime
 import webbrowser
+
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
 class StockManager:
     def __init__(self, root, current_user="Unknown", on_edit_composite=None):
@@ -22,7 +28,7 @@ class StockManager:
             self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
     def init_db(self):
-        root_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = _BASE_DIR
         self.db_path = os.path.join(root_dir, 'stock.db')
         self.backup_dir = os.path.join(root_dir, 'stock_backups')
         os.makedirs(self.backup_dir, exist_ok=True)

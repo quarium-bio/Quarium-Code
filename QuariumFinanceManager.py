@@ -1,14 +1,20 @@
 import os
+import sys
 import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox
 from QuariumProjectFlow import ProjectFlowManager
 
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+
 class FinanceManager:
     def __init__(self, root, current_user="Unknown"):
         self.root = root
         self.current_user = current_user
-        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'projects.db')
+        self.db_path = os.path.join(_BASE_DIR, 'projects.db')
         
         # We need the ProjectFlowManager's logic for cost breakdown
         self.flow_manager = ProjectFlowManager(root, current_user)

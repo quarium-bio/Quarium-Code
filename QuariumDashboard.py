@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 import os
+import sys
 import json
 import base64
 import secrets
@@ -14,6 +15,16 @@ import urllib.request
 import urllib.error
 import re
 import secrets
+
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead, and
+# anchor the working directory there too so every bare relative path used
+# throughout this app (credentials.json, token.json, *.db, etc.) resolves
+# consistently regardless of how the exe was launched.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    os.chdir(_BASE_DIR)
 
 # Import the application classes
 from QuariumClientManager import ClientManager
@@ -97,7 +108,7 @@ class QuariumDashboard:
         splash_frame = ttk.Frame(self.splash, style="TFrame", relief="solid", borderwidth=1)
         splash_frame.pack(fill="both", expand=True)
 
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'QLogo.png')
+        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
         if os.path.exists(logo_path):
             try:
                 from PIL import Image, ImageTk
@@ -810,7 +821,7 @@ class QuariumDashboard:
         
         self.create_ui()
         
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'QLogo.png')
+        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
         if os.path.exists(logo_path):
             try:
                 icon_img = tk.PhotoImage(file=logo_path)
@@ -909,7 +920,7 @@ class QuariumDashboard:
         sidebar.grid(row=0, column=0, sticky="ns")
         
         # Load and display logo
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'QLogo.png')
+        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
         if os.path.exists(logo_path):
             try:
                 from PIL import Image, ImageTk

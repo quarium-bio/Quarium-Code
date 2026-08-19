@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -8,6 +9,11 @@ try:
     from QuariumSM import StockManager
 except ImportError:
     StockManager = None
+
+# When frozen by PyInstaller, __file__ resolves inside the temporary
+# extraction folder rather than the exe's real folder, so paths built from
+# it point at a throwaway location. Use the exe's directory instead.
+_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
 DB_NAME = 'stock.db'
 
@@ -20,7 +26,7 @@ class CompositeStockManager:
             self.root.title('Composite Item Creator')
             self.root.geometry('1000x700')
 
-        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
+        self.db_path = os.path.join(_BASE_DIR, DB_NAME)
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
         self.setup_db()
