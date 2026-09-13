@@ -575,12 +575,17 @@ class QuariumDashboard:
                 if os.path.exists(name):
                     local_mod_time = os.path.getmtime(name)
                     cloud_mod_time = time.mktime(time.strptime(cloud_mod_time_str, "%Y-%m-%dT%H:%M:%S.%fZ"))
-                    
+
                     # If cloud is newer by more than a small margin (e.g., 2 seconds)
                     if cloud_mod_time > local_mod_time + 2:
                         self.drive_sync.download_file(files_in_drive[name]['id'], name)
                 else: # File doesn't exist locally, so download it
                     self.drive_sync.download_file(files_in_drive[name]['id'], name)
+
+                # Record the cloud version this local copy is now known to match, so
+                # sync_up() can detect if another instance changes the cloud file
+                # before we save, instead of silently overwriting it.
+                self.drive_sync.file_versions[name] = cloud_mod_time_str
 
     def do_sync_down_and_finish(self, read_only=False):
         ui_exists = bool(self.frames)
@@ -1922,7 +1927,39 @@ class QuariumDashboard:
         except Exception as e:
             messagebox.showerror("Import Error", f"Failed to import backup: {e}")
 
+def _acquire_single_instance_lock():
+    """Uses a Windows named mutex to detect an already-running instance.
+
+    Checked before anything else (splash screen, network calls) so a second
+    launch is rejected instantly even while the first instance is still
+    silently loading over a slow connection -- the exact scenario that
+    previously let clean_local_workspace() run twice and wipe local data.
+    The OS releases the mutex automatically on process exit, even on a
+    crash, so there's no stale-lock-file cleanup to worry about.
+    """
+    import ctypes
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.windll.kernel32
+    mutex = kernel32.CreateMutexW(None, False, "Global\\QuariumDashboard_SingleInstance")
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        return None
+    return mutex  # keep a reference alive for the process lifetime
+
+
 if __name__ == "__main__":
+    _instance_lock = _acquire_single_instance_lock()
+    if _instance_lock is None:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Quarium Dashboard is already running.\n\n"
+            "Check your taskbar for the existing window -- if your connection is slow, "
+            "it may still be loading rather than stuck.",
+            "Already Running",
+            0x30,  # MB_ICONWARNING
+        )
+        sys.exit(0)
+
     root = tk.Tk()
     app = QuariumDashboard(root)
     root.mainloop()
