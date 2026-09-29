@@ -21,7 +21,17 @@ import secrets
 # live SQLite files inside the OneDrive-synced project folder meant two sync
 # engines replicating the same open databases. Source runs get a separate
 # workspace so testing cannot disturb live data.
+import QuariumPaths
 from QuariumPaths import data_dir
+
+# Settle which workspace to use before the managers below import, because each
+# captures _BASE_DIR at import time. If a relocated folder is unreachable --
+# an external drive that is not plugged in -- this is where the user is asked,
+# before anything tries to read from it.
+if __name__ == "__main__":
+    _resolved_dir, _resolve_action = QuariumPaths.resolve_active_dir(interactive=True)
+    if _resolve_action == 'cancelled':
+        sys.exit(0)
 
 _BASE_DIR = data_dir()
 
@@ -131,6 +141,7 @@ class QuariumDashboard:
         self.frames = {}
         self.current_user = None
         self.drive_sync = None  # Initialize to None
+        self.vault_passphrase = None  # set by the launcher when the folder is encrypted
         self.local_file_mod_times = {} # To track local file changes
         # payees.db must sync: project_cost_splits and payee_settlements live in
         # projects.db and reference payee ids, so without it another machine
@@ -1715,6 +1726,10 @@ class QuariumDashboard:
 
         ttk.Button(contract_frame, text="Save Contract Info", command=save_contract_info).pack(pady=15)
 
+        workspace_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(workspace_frame, text="Data Location", group="Sync and Data")
+        self._build_workspace_tab(workspace_frame, dialog)
+
         conflicts_frame = ttk.Frame(notebook, padding=(18, 14))
         notebook.add(conflicts_frame, text="Sync Conflicts", group="Sync and Data")
         
@@ -1934,6 +1949,228 @@ class QuariumDashboard:
         else:
             ttk.Label(backup_frame, text="Backup feature requires the 'cryptography' library.\nPlease install it via terminal: pip install cryptography", foreground="red").pack(pady=10)
 
+    def _build_workspace_tab(self, parent, dialog):
+        """Lets the data folder be moved elsewhere, e.g. to an external drive."""
+        ttk.Label(parent,
+                  text="Where this computer keeps its databases and settings. The cloud copy "
+                       "is unaffected by this choice.",
+                  wraplength=560).pack(anchor="w", pady=(0, 10))
+
+        current_var = tk.StringVar()
+        status_var = tk.StringVar()
+        ttk.Label(parent, text="Current folder:").pack(anchor="w")
+        path_label = ttk.Label(parent, textvariable=current_var, foreground="#285D80",
+                               wraplength=560)
+        path_label.pack(anchor="w", pady=(0, 2))
+        ttk.Label(parent, textvariable=status_var, foreground="#666").pack(anchor="w",
+                                                                           pady=(0, 12))
+
+        def refresh():
+            active = QuariumPaths.data_dir()
+            current_var.set(active)
+            if QuariumPaths.is_relocated():
+                where = "Custom location"
+            else:
+                where = "Default location"
+            size = 0
+            for name in QuariumPaths.DATA_FILES:
+                p = os.path.join(active, name)
+                if os.path.exists(p):
+                    size += os.path.getsize(p)
+            status_var.set(f"{where}  ·  {size / 1024 / 1024:.1f} MB of data"
+                           + ("" if os.path.isdir(active) else "  ·  NOT REACHABLE"))
+
+        def choose():
+            chosen = filedialog.askdirectory(title="Choose a folder for Quarium's data",
+                                             parent=dialog)
+            if not chosen:
+                return
+            chosen = os.path.abspath(chosen)
+            if os.path.abspath(chosen) == os.path.abspath(QuariumPaths.data_dir()):
+                messagebox.showinfo("No change", "That is already the current folder.",
+                                    parent=dialog)
+                return
+
+            report = QuariumPaths.inspect_folder(chosen)
+            if not report['writable'] and report['status'] != 'missing':
+                messagebox.showerror("Not Writable",
+                                     f"Quarium cannot write to:\n\n{chosen}", parent=dialog)
+                return
+
+            if report['status'] == 'occupied':
+                if not messagebox.askyesno(
+                        "Folder Is Not Empty",
+                        f"{chosen}\n\nalready contains {len(report['entries'])} item(s) that do "
+                        "not look like Quarium data, for example:\n\n  "
+                        + "\n  ".join(report['entries'][:5])
+                        + "\n\nQuarium will add its files alongside them. Continue?",
+                        parent=dialog):
+                    return
+            elif report['status'] in ('workspace', 'data'):
+                described = ("an existing Quarium workspace" if report['status'] == 'workspace'
+                             else "Quarium data files without a workspace marker")
+                answer = messagebox.askyesno(
+                    "Existing Data Found",
+                    f"{chosen}\n\nalready holds {described} "
+                    f"({len(report['data_files'])} file(s)).\n\n"
+                    "Yes  -  use what is already there, and leave this computer's current "
+                    "data where it is\n"
+                    "No   -  cancel\n\n"
+                    "Nothing there will be overwritten either way.",
+                    parent=dialog)
+                if not answer:
+                    return
+                QuariumPaths.set_workspace(chosen)
+                QuariumPaths.write_marker(chosen)
+                self._workspace_changed(chosen, dialog, copied=False)
+                refresh()
+                return
+
+            move = messagebox.askyesno(
+                "Move or Copy",
+                f"Put this computer's data in:\n\n{chosen}\n\n"
+                "Yes  -  move it (the current folder is emptied once every file is verified)\n"
+                "No   -  copy it (the current folder keeps a copy)",
+                parent=dialog)
+            source = QuariumPaths.data_dir()
+            try:
+                copied = QuariumPaths.copy_workspace(source, chosen, move=move)
+            except Exception as e:
+                messagebox.showerror("Could Not Move",
+                                     f"Nothing was removed. The error was:\n\n{e}", parent=dialog)
+                return
+            QuariumPaths.set_workspace(chosen)
+            self._workspace_changed(chosen, dialog, copied=len(copied))
+            refresh()
+
+        def reset():
+            if QuariumPaths.is_relocated() and messagebox.askyesno(
+                    "Use Default Folder",
+                    "Go back to the default folder?\n\nThe files in the custom folder are left "
+                    "where they are; nothing is deleted.", parent=dialog):
+                QuariumPaths.clear_workspace()
+                self._workspace_changed(QuariumPaths.data_dir(), dialog, copied=False)
+                refresh()
+
+        buttons = ttk.Frame(parent)
+        buttons.pack(anchor="w")
+        ttk.Button(buttons, text="Change Folder...", command=choose).pack(side="left")
+        ttk.Button(buttons, text="Open Folder",
+                   command=lambda: os.startfile(QuariumPaths.data_dir())
+                   if os.path.isdir(QuariumPaths.data_dir()) else None).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Use Default", command=reset).pack(side="left")
+
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=16)
+
+        ttk.Label(parent, text="Encryption at rest",
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(parent,
+                  text="Worth turning on for a removable drive: the folder is encrypted when "
+                       "you close the application and decrypted when you reopen it. The cloud "
+                       "copy stays unencrypted, so a forgotten passphrase costs you the local "
+                       "files, not the data.",
+                  wraplength=560, foreground="#666").pack(anchor="w", pady=(2, 8))
+
+        vault_status = tk.StringVar()
+
+        def refresh_vault():
+            try:
+                import QuariumVault
+            except ImportError:
+                vault_status.set("Encryption unavailable: QuariumVault.py not found.")
+                return None
+            if not QuariumVault.CRYPTO_AVAILABLE:
+                vault_status.set("Encryption unavailable: the cryptography library is missing.")
+                return QuariumVault
+            active = QuariumPaths.data_dir()
+            if QuariumVault.is_enabled(active):
+                vault_status.set(f"On  ·  the folder is encrypted whenever the app is closed "
+                                 f"(currently {QuariumVault.state(active)})")
+            else:
+                vault_status.set("Off  ·  files are stored in the clear")
+            return QuariumVault
+
+        ttk.Label(parent, textvariable=vault_status, foreground="#285D80").pack(anchor="w")
+
+        def enable_encryption():
+            vault = refresh_vault()
+            if not vault or not vault.CRYPTO_AVAILABLE:
+                return
+            active = QuariumPaths.data_dir()
+            if vault.is_enabled(active):
+                messagebox.showinfo("Already On", "Encryption is already set up for this folder.",
+                                    parent=dialog)
+                return
+            first = simpledialog.askstring("Set Passphrase",
+                                           "Choose a passphrase for this data folder:",
+                                           show='*', parent=dialog)
+            if not first:
+                return
+            again = simpledialog.askstring("Set Passphrase", "Enter it again:",
+                                           show='*', parent=dialog)
+            if first != again:
+                messagebox.showerror("Mismatch", "The two entries do not match.", parent=dialog)
+                return
+            try:
+                vault.enable(active, first)
+            except Exception as e:
+                messagebox.showerror("Could Not Enable", str(e), parent=dialog)
+                return
+            self.vault_passphrase = first
+            messagebox.showwarning(
+                "Encryption On",
+                "The folder will be encrypted when you close the application.\n\n"
+                "Keep this passphrase safe. If it is lost, point Quarium at the default "
+                "folder and download a fresh copy from the cloud.",
+                parent=dialog)
+            refresh_vault()
+
+        def disable_encryption():
+            vault = refresh_vault()
+            if not vault:
+                return
+            active = QuariumPaths.data_dir()
+            if not vault.is_enabled(active):
+                return
+            passphrase = simpledialog.askstring("Turn Off Encryption",
+                                                "Enter the current passphrase:",
+                                                show='*', parent=dialog)
+            if not passphrase:
+                return
+            if not vault.verify(active, passphrase):
+                messagebox.showerror("Wrong Passphrase", "That passphrase does not match.",
+                                     parent=dialog)
+                return
+            try:
+                vault.recover(active, passphrase)
+                vault.disable(active)
+            except Exception as e:
+                messagebox.showerror("Could Not Turn Off", f"{e}\n\nNothing was deleted.",
+                                     parent=dialog)
+                return
+            self.vault_passphrase = None
+            messagebox.showinfo("Encryption Off", "The folder is stored in the clear again.",
+                                parent=dialog)
+            refresh_vault()
+
+        vault_buttons = ttk.Frame(parent)
+        vault_buttons.pack(anchor="w", pady=(8, 0))
+        ttk.Button(vault_buttons, text="Turn On Encryption...",
+                   command=enable_encryption).pack(side="left")
+        ttk.Button(vault_buttons, text="Turn Off...",
+                   command=disable_encryption).pack(side="left", padx=6)
+
+        refresh()
+        refresh_vault()
+
+    def _workspace_changed(self, path, dialog, copied):
+        detail = f"{copied} file(s) transferred.\n\n" if copied else ""
+        messagebox.showinfo(
+            "Data Location Changed",
+            f"{detail}Quarium will use:\n\n{path}\n\n"
+            "Close and reopen the application for this to take effect.",
+            parent=dialog)
+
     def _select_image(self, target_filename):
         file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg")])
         if file_path:
@@ -2025,6 +2262,56 @@ class QuariumDashboard:
         except Exception as e:
             messagebox.showerror("Import Error", f"Failed to import backup: {e}")
 
+def _unlock_workspace(workspace):
+    """Asks for the passphrase when the folder was left encrypted.
+
+    Runs before the managers import, so nothing tries to open a database that
+    is still ciphertext. Returns the passphrase to re-lock with on exit, or
+    None if encryption is off; False if the user gave up.
+    """
+    try:
+        import QuariumVault
+    except ImportError:
+        return None
+    if not QuariumVault.is_enabled(workspace):
+        return None
+    if QuariumVault.state(workspace) == QuariumVault.STATE_UNLOCKED:
+        return None
+
+    import tkinter as tk
+    from tkinter import messagebox, simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        for _attempt in range(3):
+            passphrase = simpledialog.askstring(
+                "Encrypted Data",
+                f"This data folder is encrypted:\n\n{workspace}\n\nEnter its passphrase:",
+                show='*', parent=root)
+            if passphrase is None:
+                return False
+            if not QuariumVault.verify(workspace, passphrase):
+                messagebox.showerror("Wrong Passphrase",
+                                     "That passphrase does not match this folder.", parent=root)
+                continue
+            try:
+                QuariumVault.recover(workspace, passphrase)
+            except Exception as e:
+                messagebox.showerror("Could Not Decrypt",
+                                     f"{e}\n\nNothing was deleted.", parent=root)
+                return False
+            return passphrase
+        messagebox.showerror(
+            "Encrypted Data",
+            "The folder stays encrypted.\n\nThe cloud copy is not encrypted, so you can also "
+            "switch to the default data folder in Settings and download a fresh copy.",
+            parent=root)
+        return False
+    finally:
+        root.destroy()
+
+
 def _acquire_single_instance_lock():
     """Uses a Windows named mutex to detect an already-running instance.
 
@@ -2065,8 +2352,23 @@ if __name__ == "__main__":
     migrated = QuariumPaths.migrate_if_needed()
     if migrated:
         print(f"Set up {_BASE_DIR} with {len(migrated)} item(s) from the program folder.")
+
+    _vault_passphrase = _unlock_workspace(_BASE_DIR)
+    if _vault_passphrase is False:
+        sys.exit(0)
+
     os.chdir(_BASE_DIR)
 
     root = tk.Tk()
     app = QuariumDashboard(root)
+    app.vault_passphrase = _vault_passphrase
     root.mainloop()
+
+    # Re-encrypt once the window is gone and every database has been closed.
+    if _vault_passphrase:
+        try:
+            import QuariumVault
+            if QuariumVault.is_enabled(_BASE_DIR):
+                QuariumVault.lock(_BASE_DIR, getattr(app, 'vault_passphrase', _vault_passphrase))
+        except Exception as e:
+            print("Could not re-encrypt the data folder:", e)
