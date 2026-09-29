@@ -12,6 +12,13 @@ from QuariumUI import (C_BG, C_BORDER, C_DANGER, C_DONE, C_FAINT, C_MUTED, C_SUR
 CUSTOM_OPTION = "Custom..."
 ADD_OPTION = "+ Add new payee..."
 
+# Header and rows share these pixel widths. ttk's `width` counts characters of
+# the widget's own font, so the 8pt header and 10pt rows would drift apart.
+COL_ITEM_W = 330
+COL_AMOUNT_W = 120
+COL_GAP = 14
+REAGENT_INDENT = 16
+
 TITLES = {
     QP.COST_LABOR: ("Labor", "Who performed each service"),
     QP.COST_MAINTENANCE: ("Maintenance", "Which company receives the maintenance fee"),
@@ -56,9 +63,12 @@ class AttributionEditor(tk.Toplevel):
 
         head = ttk.Frame(outer)
         head.pack(fill="x")
-        ttk.Label(head, text="ITEM", style="Caps.TLabel", width=44).pack(side="left")
-        ttk.Label(head, text="AMOUNT", style="Caps.TLabel", width=14, anchor="e").pack(side="left")
-        ttk.Label(head, text="PAYEE", style="Caps.TLabel").pack(side="left", padx=(14, 0))
+        head.columnconfigure(0, minsize=COL_ITEM_W)
+        head.columnconfigure(1, minsize=COL_AMOUNT_W)
+        ttk.Label(head, text="ITEM", style="Caps.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(head, text="AMOUNT", style="Caps.TLabel").grid(row=0, column=1, sticky="e")
+        ttk.Label(head, text="PAYEE", style="Caps.TLabel").grid(row=0, column=2, sticky="w",
+                                                                padx=(COL_GAP, 0))
         ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(6, 4))
 
         self.list = ScrollableList(outer)
@@ -138,29 +148,34 @@ class AttributionEditor(tk.Toplevel):
     def _build_row(self, line, names, choice, allocations):
         row = ttk.Frame(self.list.inner)
         row.pack(fill="x", pady=2)
+        row.columnconfigure(0, minsize=COL_ITEM_W)
+        row.columnconfigure(1, minsize=COL_AMOUNT_W)
 
-        indent = 16 if self.cost_type == QP.COST_REAGENTS else 0
+        # The reagent name is indented under its service, but the amount column
+        # keeps its position so the figures stay in one line under the header.
+        indent = REAGENT_INDENT if self.cost_type == QP.COST_REAGENTS else 0
         label = line['label'] if self.cost_type == QP.COST_REAGENTS else line['service_name']
-        ttk.Label(row, text=label, width=44 - (2 if indent else 0),
-                  font=(UI_FONT, 10)).pack(side="left", padx=(indent, 0))
-        ttk.Label(row, text=format_br_currency(line['amount']), width=14, anchor="e",
-                  font=(UI_FONT, 10)).pack(side="left")
+        ttk.Label(row, text=label, font=(UI_FONT, 10)).grid(
+            row=0, column=0, sticky="w", padx=(indent, 8))
+        ttk.Label(row, text=format_br_currency(line['amount']), anchor="e",
+                  font=(UI_FONT, 10)).grid(row=0, column=1, sticky="e")
 
         var = tk.StringVar(value=choice)
         combo = ttk.Combobox(row, textvariable=var, state="readonly", width=26,
                              values=names + [CUSTOM_OPTION, ADD_OPTION])
-        combo.pack(side="left", padx=(14, 6))
+        combo.grid(row=0, column=2, sticky="w", padx=(COL_GAP, 6))
         combo.bind("<<ComboboxSelected>>",
                    lambda e, ln=line, v=var, c=combo: self._on_choice(ln, v, c))
 
-        info = ttk.Label(row, text="", style="Muted.TLabel", width=14)
-        info.pack(side="left")
+        info = ttk.Label(row, text="", style="Muted.TLabel", width=13)
+        info.grid(row=0, column=3, sticky="w")
         if allocations and len(allocations) > 1:
             info.config(text=f"split {len(allocations)} ways")
 
         if self.cost_type in DEFAULTABLE:
             ttk.Button(row, text="Set default", style="Tiny.TButton",
-                       command=lambda ln=line, v=var: self._set_default(ln, v)).pack(side="left")
+                       command=lambda ln=line, v=var: self._set_default(ln, v)).grid(
+                row=0, column=4, sticky="w")
 
         self.row_widgets.append({'line': line, 'var': var, 'combo': combo, 'info': info})
 
