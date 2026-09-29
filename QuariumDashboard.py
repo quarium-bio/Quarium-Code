@@ -133,7 +133,10 @@ class QuariumDashboard:
         self.current_user = None
         self.drive_sync = None  # Initialize to None
         self.local_file_mod_times = {} # To track local file changes
-        self.db_files = ['stock.db', 'services.db', 'clients.db', 'projects.db', 'users.json', 'settings.json', 'QLogo.png', 'EstimateLogo.png', 'ContractTemplate_PF.docx', 'ContractTemplate_PJ.docx', 'ContractShell.docx', 'ContractHeader_PF.docx', 'ContractHeader_PJ.docx']
+        # payees.db must sync: project_cost_splits and payee_settlements live in
+        # projects.db and reference payee ids, so without it another machine
+        # would hold splits pointing at payees it has never heard of.
+        self.db_files = ['stock.db', 'services.db', 'clients.db', 'projects.db', 'payees.db', 'users.json', 'settings.json', 'QLogo.png', 'EstimateLogo.png', 'ContractTemplate_PF.docx', 'ContractTemplate_PJ.docx', 'ContractShell.docx', 'ContractHeader_PF.docx', 'ContractHeader_PJ.docx']
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
