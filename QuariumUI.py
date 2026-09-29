@@ -1,7 +1,7 @@
 """Shared look-and-feel helpers for the finance screens."""
 
 import datetime
-import itertools
+import math
 import re
 import tkinter as tk
 from tkinter import ttk
@@ -115,52 +115,42 @@ def format_br_date(value):
     return value.strftime("%d/%m/%Y") if value else ""
 
 
-_ROUNDED_SEQ = itertools.count()
-
-
 def rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
-    """Canvas has no rounded rectangle, so build one that keeps its edges.
+    """Canvas has no rounded rectangle, so trace one as a plain polygon.
 
-    A smoothed polygon looks right at a glance, but Tk treats its points as
-    spline control points rather than points the curve passes through: the
-    straight edges bow outwards and the corners spill a pixel or two past the
-    box. At the 14px height these segments are drawn at, that reads as stray
-    pixels escaping the shape.
+    Two earlier attempts both leaked pixels at these sizes. A smoothed
+    polygon treats its points as spline control points rather than points
+    the curve passes through, so edges bow and corners spill. Corner
+    pieslices are worse: Tk's arc rasteriser paints the corner of the arc's
+    own bounding box, leaving a speck sitting diagonally off each corner.
 
-    Two overlapping rectangles plus four corner arcs land exactly on the
-    coordinates asked for. Returns a tag covering every piece, so callers can
-    keep using itemconfig and delete on the single value they get back.
+    Walking the outline and handing Tk an ordinary unsmoothed polygon avoids
+    both. Every point is on the boundary, and polygon filling does not
+    overshoot it.
     """
     radius = max(0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
-    tag = f"rr{next(_ROUNDED_SEQ)}"
-    tags = kwargs.pop('tags', ())
-    if isinstance(tags, str):
-        tags = (tags,)
-    tags = tuple(tags) + (tag,)
-    # Arcs take an outline, rectangles take one too; an explicit empty outline
-    # would leave hairlines between the pieces, so each piece is drawn in the
-    # fill colour instead.
     fill = kwargs.pop('fill', '')
     kwargs.pop('outline', None)
 
-    # width=0 everywhere: a stroke is centred on the boundary, so any outline
-    # at all puts half its thickness outside the rectangle asked for.
     if radius <= 0:
-        canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=fill, width=0,
-                                tags=tags, **kwargs)
-        return tag
+        # width=0: a stroke straddles the boundary, so half of it would land
+        # outside the rectangle asked for.
+        return canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=fill,
+                                       width=0, **kwargs)
 
-    d = radius * 2
-    canvas.create_rectangle(x0 + radius, y0, x1 - radius, y1,
-                            fill=fill, outline=fill, width=0, tags=tags, **kwargs)
-    canvas.create_rectangle(x0, y0 + radius, x1, y1 - radius,
-                            fill=fill, outline=fill, width=0, tags=tags, **kwargs)
-    for cx, cy, start in ((x0, y0, 90), (x1 - d, y0, 0),
-                          (x0, y1 - d, 180), (x1 - d, y1 - d, 270)):
-        canvas.create_arc(cx, cy, cx + d, cy + d, start=start, extent=90,
-                          style="pieslice", fill=fill, outline=fill, width=0,
-                          tags=tags, **kwargs)
-    return tag
+    # Canvas y grows downwards, so angle 0 points right and 90 points down.
+    steps = max(3, int(round(radius)))
+    points = []
+    for cx, cy, start in ((x1 - radius, y1 - radius, 0),      # bottom right
+                          (x0 + radius, y1 - radius, 90),     # bottom left
+                          (x0 + radius, y0 + radius, 180),    # top left
+                          (x1 - radius, y0 + radius, 270)):   # top right
+        for step in range(steps + 1):
+            angle = math.radians(start + 90.0 * step / steps)
+            points.extend((cx + radius * math.cos(angle),
+                           cy + radius * math.sin(angle)))
+    return canvas.create_polygon(points, smooth=False, fill=fill, outline=fill,
+                                 width=0, **kwargs)
 
 
 class ScrollableList(ttk.Frame):
