@@ -128,16 +128,16 @@ def init_project_tables():
                 cur.execute(f'ALTER TABLE projects ADD COLUMN {column}')
             except sqlite3.OperationalError:
                 pass
-        # A line is (project_service, cost type, optional requirement row).
-        # requirement_id rather than stock_item_id, because one service can
-        # list the same reagent more than once with different quantities.
+        # A line is (project_service, cost type, optional stock item). A
+        # service may list the same reagent on several requirement rows, but
+        # they are always sourced together, so they are summed into one line.
         cur.execute('''
             CREATE TABLE IF NOT EXISTS project_cost_splits (
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 project_service_id INTEGER NOT NULL,
                 cost_type TEXT NOT NULL,
-                requirement_id INTEGER,
+                stock_item_id INTEGER,
                 payee_id INTEGER NOT NULL,
                 percentage REAL NOT NULL DEFAULT 100,
                 updated_at TEXT,
@@ -356,13 +356,15 @@ def calculate_cost_lines(project_id):
                     'SELECT name FROM services_db.services WHERE id = ?', (service_id,)).fetchone()
                 service_name = service_name[0] if service_name else f"Servico {service_id}"
 
-                for (req_id, stock_item_id, req_qty, req_unit, spb,
+                reagents = {}
+                for (stock_item_id, req_qty, req_unit, spb,
                      reagent_name, price, container_size, stock_unit) in cur.execute('''
-                        SELECT sr.id, sr.stock_item_id, sr.quantity, sr.unit, sr.samples_per_batch,
+                        SELECT sr.stock_item_id, sr.quantity, sr.unit, sr.samples_per_batch,
                                st.name, st.price, st.container_size, st.unit
                         FROM services_db.service_requirements sr
                         LEFT JOIN stock_db.stock st ON sr.stock_item_id = st.id
                         WHERE sr.service_id = ?
+                        ORDER BY sr.id
                     ''', (service_id,)).fetchall():
                     if price is None or not container_size or container_size <= 0:
                         continue
@@ -371,15 +373,22 @@ def calculate_cost_lines(project_id):
                     batches = math.ceil(samples / spb) if spb and spb > 0 else samples
                     amount = req_qty * conv * batches * unit_cost
                     base_raw += amount
+                    # Several requirement rows can name the same reagent; they
+                    # are sourced together, so they form one attributable line.
+                    entry = reagents.setdefault(
+                        stock_item_id,
+                        {'amount': 0.0, 'label': reagent_name or f"Item {stock_item_id}"})
+                    entry['amount'] += amount
+
+                for stock_item_id, entry in reagents.items():
                     lines.append({
                         'project_service_id': ps_id,
                         'service_id': service_id,
                         'service_name': service_name,
                         'cost_type': COST_REAGENTS,
-                        'requirement_id': req_id,
                         'stock_item_id': stock_item_id,
-                        'label': reagent_name or f"Item {stock_item_id}",
-                        'raw_amount': amount,
+                        'label': entry['label'],
+                        'raw_amount': entry['amount'],
                     })
 
                 for cost_type, cost, spb in cur.execute(
@@ -398,7 +407,6 @@ def calculate_cost_lines(project_id):
                         'service_id': service_id,
                         'service_name': service_name,
                         'cost_type': cost_type,
-                        'requirement_id': None,
                         'stock_item_id': None,
                         'label': service_name,
                         'raw_amount': amount,
@@ -421,21 +429,21 @@ def calculate_cost_lines(project_id):
 # --------------------------------------------------------------------- splits
 
 def load_splits(project_id):
-    """{(project_service_id, cost_type, requirement_id): [(payee_id, percentage)]}"""
+    """{(project_service_id, cost_type, stock_item_id): [(payee_id, percentage)]}"""
     init_project_tables()
     conn = _connect(PROJECT_DB)
     try:
         splits = {}
-        for ps_id, cost_type, req_id, payee_id, pct in conn.execute(
-                'SELECT project_service_id, cost_type, requirement_id, payee_id, percentage '
+        for ps_id, cost_type, item_id, payee_id, pct in conn.execute(
+                'SELECT project_service_id, cost_type, stock_item_id, payee_id, percentage '
                 'FROM project_cost_splits WHERE project_id = ?', (project_id,)).fetchall():
-            splits.setdefault((ps_id, cost_type, req_id), []).append((payee_id, pct))
+            splits.setdefault((ps_id, cost_type, item_id), []).append((payee_id, pct))
         return splits
     finally:
         conn.close()
 
 
-def set_split(project_id, project_service_id, cost_type, requirement_id, allocations,
+def set_split(project_id, project_service_id, cost_type, stock_item_id, allocations,
               current_user="Unknown"):
     """Replaces the attribution for one line. allocations = [(payee_id, percentage)]."""
     total = round(sum(pct for _, pct in allocations), 6)
@@ -445,14 +453,14 @@ def set_split(project_id, project_service_id, cost_type, requirement_id, allocat
     try:
         cur = conn.cursor()
         cur.execute('DELETE FROM project_cost_splits WHERE project_id = ? AND project_service_id = ? '
-                    'AND cost_type = ? AND requirement_id IS ?',
-                    (project_id, project_service_id, cost_type, requirement_id))
+                    'AND cost_type = ? AND stock_item_id IS ?',
+                    (project_id, project_service_id, cost_type, stock_item_id))
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         for payee_id, pct in allocations:
             cur.execute('INSERT INTO project_cost_splits (project_id, project_service_id, cost_type, '
-                        'requirement_id, payee_id, percentage, updated_at, updated_by) '
+                        'stock_item_id, payee_id, percentage, updated_at, updated_by) '
                         'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                        (project_id, project_service_id, cost_type, requirement_id,
+                        (project_id, project_service_id, cost_type, stock_item_id,
                          payee_id, pct, now, current_user))
         conn.commit()
     finally:
@@ -506,7 +514,7 @@ def resolve_recipients(project_id, responsible_name=None):
         return True
 
     for line in lines:
-        key = (line['project_service_id'], line['cost_type'], line['requirement_id'])
+        key = (line['project_service_id'], line['cost_type'], line['stock_item_id'])
         allocations = splits.get(key)
 
         if not allocations:

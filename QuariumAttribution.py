@@ -86,7 +86,7 @@ class AttributionEditor(tk.Toplevel):
 
     def _current_choice(self, line, splits, defaults):
         """What the dropdown should show for this line."""
-        key = (line['project_service_id'], line['cost_type'], line['requirement_id'])
+        key = (line['project_service_id'], line['cost_type'], line['stock_item_id'])
         allocations = splits.get(key)
         if allocations:
             if len(allocations) == 1:
@@ -178,7 +178,7 @@ class AttributionEditor(tk.Toplevel):
         if payee_id is None:
             return
         QP.set_split(self.project_id, line['project_service_id'], line['cost_type'],
-                     line['requirement_id'], [(payee_id, 100.0)], self.current_user)
+                     line['stock_item_id'], [(payee_id, 100.0)], self.current_user)
         self.reload()
 
     def _add_payee(self, var, combo):
@@ -222,7 +222,7 @@ class AttributionEditor(tk.Toplevel):
     def _open_split(self, line, var):
         existing = None
         splits = QP.load_splits(self.project_id)
-        key = (line['project_service_id'], line['cost_type'], line['requirement_id'])
+        key = (line['project_service_id'], line['cost_type'], line['stock_item_id'])
         if splits.get(key):
             existing = splits[key]
         label = line['label'] if self.cost_type == QP.COST_REAGENTS else line['service_name']
@@ -232,7 +232,7 @@ class AttributionEditor(tk.Toplevel):
             self.reload()
             return
         QP.set_split(self.project_id, line['project_service_id'], line['cost_type'],
-                     line['requirement_id'], dialog.result, self.current_user)
+                     line['stock_item_id'], dialog.result, self.current_user)
         self.reload()
 
 
