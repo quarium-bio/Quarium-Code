@@ -59,6 +59,68 @@ except ImportError:
 CURRENT_VERSION = "2.1.0"
 UPDATE_URL = "https://raw.githubusercontent.com/quarium-bio/Quarium-Code/main/version.json" # Change to your actual raw URL
 
+class SectionNav(ttk.Frame):
+    """Side navigation that stands in for a ttk.Notebook.
+
+    Exposes the same add(child, text=...) call, so sections built for a
+    notebook work unchanged, but shows them from a grouped list on the left
+    instead of a row of tabs that runs out of width.
+    """
+
+    def __init__(self, parent, nav_width=210, groups=(), **kwargs):
+        super().__init__(parent, **kwargs)
+        self.tree = ttk.Treeview(self, show="tree", selectmode="browse", height=18)
+        self.tree.column("#0", width=nav_width, stretch=False)
+        self.tree.pack(side="left", fill="y")
+        ttk.Separator(self, orient="vertical").pack(side="left", fill="y", padx=(10, 14))
+        self.body = ttk.Frame(self)
+        self.body.pack(side="left", fill="both", expand=True)
+
+        self._sections = {}
+        self._groups = {}
+        self._current = None
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        # Declared up front so the sidebar reads in a deliberate order rather
+        # than whatever order the sections happen to be built in.
+        for name in groups:
+            self._groups[name] = self.tree.insert("", "end", text=name, open=True)
+
+    def add(self, child, text="", group=None):
+        parent = ""
+        if group:
+            if group not in self._groups:
+                self._groups[group] = self.tree.insert("", "end", text=group, open=True)
+            parent = self._groups[group]
+        iid = self.tree.insert(parent, "end", text="   " + text)
+        self._sections[iid] = child
+        if len(self._sections) == 1:
+            self.tree.selection_set(iid)
+            self._show(iid)
+        return iid
+
+    def _on_select(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        iid = selection[0]
+        if iid not in self._sections:
+            # A group heading was clicked; fall through to its first section.
+            children = self.tree.get_children(iid)
+            if children:
+                self.tree.selection_set(children[0])
+            return
+        self._show(iid)
+
+    def _show(self, iid):
+        if self._current == iid:
+            return
+        for section in self._sections.values():
+            section.pack_forget()
+        self._sections[iid].pack(in_=self.body, fill="both", expand=True)
+        self._current = iid
+
+
 class QuariumDashboard:
     def __init__(self, root):
         self.root = root
@@ -1211,12 +1273,16 @@ class QuariumDashboard:
     def open_settings(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Settings")
-        dialog.geometry("800x600")
+        dialog.geometry("1000x680")
+        dialog.minsize(860, 560)
         dialog.transient(self.root)
         dialog.grab_set()
 
-        notebook = ttk.Notebook(dialog)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        # Nine sections across the top of a notebook left no room to breathe;
+        # a grouped list down the side gives each one the full width.
+        notebook = SectionNav(dialog, groups=("Appearance", "Users and Access", "Estimates",
+                                              "Contracts", "Sync and Data"))
+        notebook.pack(fill="both", expand=True, padx=14, pady=14)
 
         settings_path = 'settings.json'
         settings = {}
@@ -1226,8 +1292,8 @@ class QuariumDashboard:
                     settings = json.load(f)
             except Exception: pass
 
-        gen_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(gen_frame, text="General")
+        gen_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(gen_frame, text="General", group="Appearance")
 
         ttk.Label(gen_frame, text="Dashboard Logo (QLogo.png):").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Button(gen_frame, text="Select New Image", command=lambda: self._select_image('QLogo.png')).grid(row=0, column=1, padx=5, pady=5)
@@ -1252,11 +1318,11 @@ class QuariumDashboard:
 
         ttk.Button(gen_frame, text="Save General Settings", command=save_general).grid(row=3, column=0, columnspan=2, pady=15)
 
-        users_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(users_frame, text="Users")
+        users_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(users_frame, text="Users", group="Users and Access")
 
-        pass_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(pass_frame, text="Passwords")
+        pass_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(pass_frame, text="Passwords", group="Users and Access")
 
         # --- Users Tab ---
         user_tree = ttk.Treeview(users_frame, columns=("Full Name",), height=8)
@@ -1412,8 +1478,8 @@ class QuariumDashboard:
 
             ttk.Button(admin_frame, text="Reset Password", command=reset_password).pack(anchor="w", pady=10)
 
-        taxes_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(taxes_frame, text="Taxes")
+        taxes_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(taxes_frame, text="Taxes", group="Estimates")
 
         ttk.Label(taxes_frame, text="Profit Margin (%):").grid(row=0, column=0, sticky="w", pady=5)
         profit_var = tk.StringVar(value=str(settings.get("profit_margin", 0.0)))
@@ -1438,8 +1504,8 @@ class QuariumDashboard:
 
         ttk.Button(taxes_frame, text="Save Taxes Settings", command=save_taxes).grid(row=2, column=0, columnspan=2, pady=15)
 
-        obs_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(obs_frame, text="Default Observations")
+        obs_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(obs_frame, text="Default Observations", group="Estimates")
 
         ttk.Label(obs_frame, text="Saved Observations:").pack(anchor="w")
         obs_listbox = tk.Listbox(obs_frame, height=8)
@@ -1531,8 +1597,8 @@ class QuariumDashboard:
 
         ttk.Button(obs_frame, text="Save Observations", command=save_obs_settings).pack(pady=15)
 
-        conn_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(conn_frame, text="Connection")
+        conn_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(conn_frame, text="Connection", group="Sync and Data")
         
         ttk.Label(conn_frame, text="Disconnecting will log you out and allow you to load a different company's credentials.json file. Local files will be cleared to prevent data mixing.", wraplength=500).pack(pady=10)
         
@@ -1562,8 +1628,8 @@ class QuariumDashboard:
         ttk.Button(conn_frame, text="Disconnect from Company", command=do_disconnect, style="Accent.TButton").pack(pady=10)
 
         # --- Contract Info Tab ---
-        contract_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(contract_frame, text="Contract Info")
+        contract_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(contract_frame, text="Contract Info", group="Contracts")
 
         ttk.Label(contract_frame, text="Enter your company's information for contract generation.", wraplength=500).pack(pady=(0, 10), anchor="w")
 
@@ -1617,8 +1683,8 @@ class QuariumDashboard:
 
         ttk.Button(contract_frame, text="Save Contract Info", command=save_contract_info).pack(pady=15)
 
-        conflicts_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(conflicts_frame, text="Sync Conflicts")
+        conflicts_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(conflicts_frame, text="Sync Conflicts", group="Sync and Data")
         
         ttk.Label(conflicts_frame, text="Conflict files are generated when two users edit the database simultaneously, or if someone works offline. Download them here to manually inspect the changes, then delete them from the cloud when resolved.", wraplength=500).pack(pady=(0, 10), anchor="w")
         
@@ -1825,8 +1891,8 @@ class QuariumDashboard:
         ttk.Button(c_btn_frame, text="Resolve Selected", command=resolve_conflict).pack(side="left", padx=5)
         ttk.Button(c_btn_frame, text="Delete from Cloud", command=delete_conflict).pack(side="left", padx=5)
 
-        backup_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(backup_frame, text="Data Backup")
+        backup_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(backup_frame, text="Data Backup", group="Sync and Data")
         
         ttk.Label(backup_frame, text="Create or restore an encrypted backup of all system databases and images.", wraplength=500).pack(pady=10)
         
