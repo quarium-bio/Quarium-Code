@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import base64
+import calendar
 import secrets
 import zipfile
 import shutil
@@ -258,7 +259,15 @@ class QuariumDashboard:
                 except Exception: pass
 
     def apply_profile(self, comp_name, config):
-        self.clean_local_workspace()
+        # The wipe exists so switching company profiles cannot leave the
+        # previous company's data behind. Running it on every start also
+        # deleted files that were already up to date, which left
+        # _conditional_sync_down with nothing on disk to compare against and
+        # forced a full re-download of all synced files each launch.
+        if config.get("workspace_company") != comp_name:
+            self.clean_local_workspace()
+            config["workspace_company"] = comp_name
+            self.save_local_config(config)
         prof = config["companies"].get(comp_name)
         if not prof: return
         with open("credentials.json", "w") as f:
@@ -620,6 +629,24 @@ class QuariumDashboard:
                 except OSError:
                     pass
 
+    @staticmethod
+    def _parse_drive_time(value):
+        """Drive stamps are RFC3339 in UTC.
+
+        time.mktime() would read them as local time, which west of UTC makes
+        every cloud file look newer than the local copy and re-downloads the
+        whole synced set on every launch. calendar.timegm() reads them as the
+        UTC they actually are.
+        """
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+            try:
+                return calendar.timegm(time.strptime(value, fmt))
+            except ValueError:
+                continue
+        return None
+
     def _conditional_sync_down(self, files_to_sync):
         """Downloads files only if the cloud version is newer than the local version."""
         if not self.drive_sync:
@@ -636,10 +663,10 @@ class QuariumDashboard:
                 # Compare modification times
                 if os.path.exists(name):
                     local_mod_time = os.path.getmtime(name)
-                    cloud_mod_time = time.mktime(time.strptime(cloud_mod_time_str, "%Y-%m-%dT%H:%M:%S.%fZ"))
+                    cloud_mod_time = self._parse_drive_time(cloud_mod_time_str)
 
                     # If cloud is newer by more than a small margin (e.g., 2 seconds)
-                    if cloud_mod_time > local_mod_time + 2:
+                    if cloud_mod_time is None or cloud_mod_time > local_mod_time + 2:
                         self.drive_sync.download_file(files_in_drive[name]['id'], name)
                 else: # File doesn't exist locally, so download it
                     self.drive_sync.download_file(files_in_drive[name]['id'], name)
@@ -1614,6 +1641,7 @@ class QuariumDashboard:
             
             config = self.load_local_config()
             config["active_company"] = None
+            config["workspace_company"] = None
             self.save_local_config(config)
             
             self.force_disconnect = True
