@@ -35,6 +35,25 @@ if __name__ == "__main__":
 
 _BASE_DIR = data_dir()
 
+
+def asset_path(name):
+    """Finds a logo or template wherever this build keeps it.
+
+    The workspace copy wins, but it only arrives with the first sync. Before
+    that -- a fresh install, or the launch right after a profile switch has
+    cleared the workspace -- fall back to whatever ships with the program, so
+    the splash screen is not left blank.
+    """
+    candidates = [os.path.join(_BASE_DIR, name)]
+    bundled = getattr(sys, '_MEIPASS', None)
+    if bundled:
+        candidates.append(os.path.join(bundled, name))
+    candidates.append(os.path.join(QuariumPaths.program_dir(), name))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
 # Import the application classes
 from QuariumClientManager import ClientManager
 from QuariumServiceManager import ServiceManager
@@ -184,8 +203,8 @@ class QuariumDashboard:
         splash_frame = ttk.Frame(self.splash, style="TFrame", relief="solid", borderwidth=1)
         splash_frame.pack(fill="both", expand=True)
 
-        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
-        if os.path.exists(logo_path):
+        logo_path = asset_path('QLogo.png')
+        if logo_path:
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(logo_path)
@@ -965,8 +984,8 @@ class QuariumDashboard:
         
         self.create_ui()
         
-        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
-        if os.path.exists(logo_path):
+        logo_path = asset_path('QLogo.png')
+        if logo_path:
             try:
                 icon_img = tk.PhotoImage(file=logo_path)
                 self.root.iconphoto(True, icon_img)
@@ -1033,16 +1052,22 @@ class QuariumDashboard:
                   foreground=[('selected', COLOR_WHITE)])
 
         # Sidebar navigation buttons
+        # Nine sections plus Settings, Log Out and Quit have to share the
+        # column, so the vertical padding stays tight: at 10 all round the
+        # stack outgrew a 1080p screen and the bottom buttons were cut off.
         style.configure("Toolbutton",
                         background=COLOR_WHITE,
                         foreground=COLOR_PRIMARY,
-                        font=('Helvetica', 11),
-                        padding=10,
+                        font=('Helvetica', 10),
+                        padding=(10, 4),
                         borderwidth=0,
                         anchor="w")
         style.map("Toolbutton",
                   background=[('selected', COLOR_PRIMARY), ('active', COLOR_LIGHT_GRAY)],
                   foreground=[('selected', COLOR_WHITE)])
+
+        # The Settings / Log Out / Quit group, matched to the nav buttons.
+        style.configure("Sidebar.TButton", font=('Helvetica', 10), padding=(10, 4))
 
         # Entry and Combobox
         style.configure("TEntry", fieldbackground=COLOR_LIGHT_GRAY, borderwidth=1, relief="flat")
@@ -1064,12 +1089,12 @@ class QuariumDashboard:
         sidebar.grid(row=0, column=0, sticky="ns")
         
         # Load and display logo
-        logo_path = os.path.join(_BASE_DIR, 'QLogo.png')
-        if os.path.exists(logo_path):
+        logo_path = asset_path('QLogo.png')
+        if logo_path:
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(logo_path)
-                img.thumbnail((120, 120))  # Resize nicely while preserving aspect ratio
+                img.thumbnail((80, 80))  # Small: the column has 12 controls to fit as well
                 self.logo_img = ImageTk.PhotoImage(img)
             except ImportError:
                 messagebox.showwarning("Optional Dependency Missing", "The 'Pillow' library is not installed. Logo image quality may be reduced.\n\nInstall it with: pip install Pillow")
@@ -1083,12 +1108,28 @@ class QuariumDashboard:
             sidebar_logo_label.pack(pady=(10, 5))
         
         # Application title in sidebar
-        ttk.Label(sidebar, text="Quarium\nDashboard", font=('Helvetica', 16, 'bold'), justify="center").pack(pady=(0, 10))
-        
-        self.status_label = tk.Label(sidebar, text="● EDITING", font=('Helvetica', 11, 'bold'), bg="#FFFFFF", fg="#2E7D32")
-        self.status_label.pack(pady=(0, 10))
-        
+        ttk.Label(sidebar, text="Quarium\nDashboard", font=('Helvetica', 13, 'bold'), justify="center").pack(pady=(0, 6))
+
+        self.status_label = tk.Label(sidebar, text="● EDITING", font=('Helvetica', 10, 'bold'), bg="#FFFFFF", fg="#2E7D32")
+        self.status_label.pack(pady=(0, 6))
+
         self.request_edit_btn = ttk.Button(sidebar, text="Request Edit Access", command=self.manual_request_edit, style="Accent.TButton")
+
+        # Packed before the section buttons on purpose. Pack hands out space in
+        # call order, so claiming the bottom first means a long section list
+        # can never push Settings, Log Out and Quit off the screen.
+        ttk.Button(sidebar, text="Quit", command=self.on_closing,
+                   style="Sidebar.TButton").pack(side="bottom", fill="x", pady=(2, 0))
+        ttk.Button(sidebar, text="Log Out", command=self.logout,
+                   style="Sidebar.TButton").pack(side="bottom", fill="x", pady=2)
+        ttk.Button(sidebar, text="Settings", command=self.open_settings,
+                   style="Sidebar.TButton").pack(side="bottom", fill="x", pady=(8, 2))
+
+        # The section buttons live in their own frame, packed last and allowed
+        # to take whatever is left. Any shortage is then absorbed here rather
+        # than by the fixed controls above and below it.
+        nav_holder = ttk.Frame(sidebar)
+        nav_holder.pack(side="top", fill="both", expand=True)
         
         # Main content area
         self.content_area = ttk.Frame(self.root)
@@ -1098,7 +1139,7 @@ class QuariumDashboard:
         
         # Define apps to load
         app_definitions = [
-            ("Projects", "Project Manager", ProjectManager, {'current_user': self.current_user}),
+            ("Projects", "Estimate Manager", ProjectManager, {'current_user': self.current_user}),
             ("Flow", "Project Flow", ProjectFlowManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
             ("Finances", "Project Finances", FinanceManager, {'current_user': self.current_user}),
             ("Debts", "Debts and Credits", DebtsManager, {'current_user': self.current_user}),
@@ -1115,14 +1156,14 @@ class QuariumDashboard:
         for app_id, title, app_class, kwargs in app_definitions:
             # Navigation button (acting like a tab using the Toolbutton style)
             btn = ttk.Radiobutton(
-                sidebar, 
+                nav_holder,
                 text=title, 
                 variable=self.current_view, 
                 value=app_id,
                 style="Toolbutton",
                 command=self.switch_view
             )
-            btn.pack(fill="x", pady=5, ipady=5)
+            btn.pack(fill="x", pady=1)
             
             # App frame
             frame = ttk.Frame(self.content_area)
@@ -1135,15 +1176,6 @@ class QuariumDashboard:
             else:
                 self.apps[app_id] = app_class(frame)
             
-        # Link dependencies between managers
-        if "Projects" in self.apps and "Flow" in self.apps:
-            self.apps["Projects"].project_flow_manager = self.apps["Flow"]
-
-        # Bottom buttons
-        ttk.Button(sidebar, text="Quit", command=self.on_closing).pack(side="bottom", fill="x", pady=(0, 5))
-        ttk.Button(sidebar, text="Log Out", command=self.logout).pack(side="bottom", fill="x", pady=(5, 5))
-        ttk.Button(sidebar, text="Settings", command=self.open_settings).pack(side="bottom", fill="x", pady=(5, 5))
-
         # Show initial view
         self.switch_view()
         

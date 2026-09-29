@@ -74,9 +74,8 @@ class ProjectManager:
     def __init__(self, root, current_user="Unknown"):
         self.root = root
         self.current_user = current_user
-        self.project_flow_manager = None # Will be set by Dashboard
         if isinstance(self.root, (tk.Tk, tk.Toplevel)):
-            self.root.title("Quarium Project Manager")
+            self.root.title("Quarium Estimate Manager")
             self.root.geometry("1200x800")
 
         self.project_db_path = os.path.join(_BASE_DIR, 'projects.db')
@@ -340,42 +339,6 @@ class ProjectManager:
         ttk.Button(btn_frame, text="Delete Selected Estimate", command=self.delete_selected_estimate).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Export PDF", command=self.export_selected_pdf).pack(side="left", padx=5)
 
-        # --- Tab 3: Finances ---
-        self.tab_finances = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_finances, text="Project Finances")
-
-        projects_frame_fin = ttk.LabelFrame(self.tab_finances, text="Projects Financial Status", padding=10)
-        projects_frame_fin.pack(fill="both", expand=True, pady=(0, 10))
-
-        self.projects_tree_fin = ttk.Treeview(projects_frame_fin, columns=("Client", "Status", "Total Cost", "Profit"), height=15)
-        self.projects_tree_fin.heading("#0", text="Estimate #")
-        self.projects_tree_fin.heading("Client", text="Client")
-        self.projects_tree_fin.heading("Status", text="Financial Status")
-        self.projects_tree_fin.heading("Total Cost", text="Total Cost")
-        self.projects_tree_fin.heading("Profit", text="Est. Profit")
-
-        self.projects_tree_fin.column("#0", width=150)
-        self.projects_tree_fin.column("Client", width=200)
-        self.projects_tree_fin.column("Status", width=150, anchor="center")
-        self.projects_tree_fin.column("Total Cost", width=120, anchor="e")
-        self.projects_tree_fin.column("Profit", width=120, anchor="e")
-        
-        self.projects_tree_fin.pack(side="left", fill="both", expand=True)
-
-        scrollbar_fin = ttk.Scrollbar(projects_frame_fin, orient="vertical", command=self.projects_tree_fin.yview)
-        scrollbar_fin.pack(side="right", fill="y")
-        self.projects_tree_fin.configure(yscrollcommand=scrollbar_fin.set)
-
-        totals_frame_fin = ttk.LabelFrame(self.tab_finances, text="Overall Financial Summary", padding=10)
-        totals_frame_fin.pack(fill="x")
-
-        self.totals_tree_fin = ttk.Treeview(totals_frame_fin, columns=("Amount",), height=4)
-        self.totals_tree_fin.heading("#0", text="Category")
-        self.totals_tree_fin.heading("Amount", text="Total Amount")
-        self.totals_tree_fin.column("#0", width=200)
-        self.totals_tree_fin.column("Amount", width=150, anchor="e")
-        self.totals_tree_fin.pack(fill="x")
-
     def load_all_data(self):
         self.load_settings()
         self.load_clients()
@@ -383,8 +346,6 @@ class ProjectManager:
         self.load_users()
         self.load_saved_estimates()
         self.update_total_cost()
-        if self.project_flow_manager: # Check if it has been set
-            self.load_financial_data()
         
     def load_settings(self):
         settings_path = os.path.join(_BASE_DIR, 'settings.json')
@@ -1108,65 +1069,6 @@ class ProjectManager:
         formatted = f"{value:,.2f}"
         formatted = formatted.replace(',', 'X').replace('.', ',').replace('X', '.')
         return f"R$ {formatted}"
-
-    def get_financial_status(self, project_data):
-        status, inv_sent, inv_paid, lnp_emit, lnp_paid = project_data
-        if status < 6:
-            return "In Progress"
-        if lnp_paid:
-            return "LNP Paid"
-        if lnp_emit:
-            return "LNP Emitted"
-        if inv_paid:
-            return "Invoice Paid"
-        if inv_sent:
-            return "Invoice Sent"
-        return "Awaiting Invoice"
-
-    def load_financial_data(self):
-        for item in self.projects_tree_fin.get_children():
-            self.projects_tree_fin.delete(item)
-        for item in self.totals_tree_fin.get_children():
-            self.totals_tree_fin.delete(item)
-
-        total_reagents, total_labor, total_maintenance, total_profit = 0, 0, 0, 0
-
-        try:
-            self.cursor.execute('''
-                SELECT 
-                    p.id, p.estimate_number, c.name as client_name, p.final_cost, p.status, 
-                    p.invoice_sent, p.invoice_paid, p.lnp_emitted, p.lnp_paid
-                FROM projects p
-                LEFT JOIN clients_db.clients c ON p.client_id = c.id
-                WHERE p.status > 0
-                ORDER BY p.status, p.id DESC;
-            ''')
-            projects = self.cursor.fetchall()
-
-            for row in projects:
-                p_id, est_num, client_name, final_cost, status, inv_sent, inv_paid, lnp_emit, lnp_paid = row
-                
-                breakdown = self.project_flow_manager.calculate_cost_breakdown(p_id)
-                fin_status = self.get_financial_status((status, inv_sent, inv_paid, lnp_emit, lnp_paid))
-
-                self.projects_tree_fin.insert("", "end", text=est_num, values=(
-                    client_name or "Unknown", fin_status, self.format_br_currency(final_cost),
-                    self.format_br_currency(breakdown.get("Profit", 0))
-                ))
-
-                total_reagents += breakdown.get("Reagents", 0)
-                total_labor += breakdown.get("Labor", 0)
-                total_maintenance += breakdown.get("Maintenance", 0)
-                total_profit += breakdown.get("Profit", 0)
-
-            self.totals_tree_fin.insert("", "end", text="Total Reagents Cost", values=(self.format_br_currency(total_reagents),))
-            self.totals_tree_fin.insert("", "end", text="Total Labor Cost", values=(self.format_br_currency(total_labor),))
-            self.totals_tree_fin.insert("", "end", text="Total Maintenance Cost", values=(self.format_br_currency(total_maintenance),))
-            self.totals_tree_fin.insert("", "end", text="Total Estimated Profit", values=(self.format_br_currency(total_profit),), tags=('profit',))
-            self.totals_tree_fin.tag_configure('profit', font=('Helvetica', 10, 'bold'))
-
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Could not load financial data: {e}")
 
     def export_selected_pdf(self):
         selection = self.saved_tree.selection()
