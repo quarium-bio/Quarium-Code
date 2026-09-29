@@ -7,128 +7,22 @@ from tkinter import ttk, messagebox
 import tkinter.font as tkfont
 
 import QuariumPayees as QP
+import QuariumAttribution
+from QuariumUI import (C_BG, C_BORDER, C_DANGER, C_DONE, C_FAINT, C_MUTED, C_PRIMARY,
+                       C_SURFACE, C_TEXT, C_TODO, UI_FONT, ScrollableList,
+                       apply_modern_style, format_br_currency, rounded_rect)
 
 # When frozen by PyInstaller, __file__ resolves inside the temporary
 # extraction folder rather than the exe's real folder, so paths built from
 # it point at a throwaway location. Use the exe's directory instead.
 _BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
-# Flat, low-chrome palette: one accent, soft neutrals, no bevels.
-C_BG = "#FFFFFF"
-C_SURFACE = "#F9FAFB"
-C_BORDER = "#E8EAED"
-C_TEXT = "#111827"
-C_MUTED = "#6B7280"
-C_FAINT = "#9CA3AF"
-C_DONE = "#16A34A"
-C_TODO = "#E5E7EB"
-C_PRIMARY = "#285D80"
-C_DANGER = "#B91C1C"
-
-UI_FONT = "Segoe UI"
 ROW_HEIGHT = 34
 BAR_WIDTH = 258
 SEG_GAP = 3
 COL_EST, COL_CLIENT, COL_TOTAL, COL_BAR = 16, 140, 330, 480
 HEADER_H = 92
 LABEL_ANGLE = 30
-
-
-def format_br_currency(value):
-    try:
-        value = float(value or 0)
-    except (TypeError, ValueError):
-        value = 0.0
-    return "R$ " + f"{value:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-
-
-def apply_modern_style(widget):
-    """Flattens ttk chrome and switches to the system UI font."""
-    style = ttk.Style(widget)
-    try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
-    style.configure(".", font=(UI_FONT, 10), background=C_BG, foreground=C_TEXT)
-    style.configure("TFrame", background=C_BG)
-    style.configure("Surface.TFrame", background=C_SURFACE)
-    style.configure("TLabel", background=C_BG, foreground=C_TEXT)
-    style.configure("Muted.TLabel", foreground=C_MUTED, font=(UI_FONT, 9))
-    style.configure("Title.TLabel", font=(UI_FONT, 16), foreground=C_TEXT)
-    style.configure("Section.TLabel", font=(UI_FONT, 11, "bold"), foreground=C_TEXT)
-    style.configure("Amount.TLabel", font=(UI_FONT, 10))
-    style.configure("Danger.TLabel", foreground=C_DANGER, font=(UI_FONT, 9))
-    style.configure("Flat.TButton", font=(UI_FONT, 9), relief="flat", borderwidth=0,
-                    padding=(12, 6), background=C_SURFACE, foreground=C_TEXT)
-    style.map("Flat.TButton", background=[("active", "#EDEFF2")])
-    style.configure("Primary.TButton", font=(UI_FONT, 9), relief="flat", borderwidth=0,
-                    padding=(14, 6), background=C_PRIMARY, foreground="#FFFFFF")
-    style.map("Primary.TButton", background=[("active", "#20506F")])
-    style.configure("Treeview", font=(UI_FONT, 10), rowheight=26, borderwidth=0,
-                    fieldbackground=C_BG, background=C_BG)
-    style.configure("Treeview.Heading", font=(UI_FONT, 9), relief="flat",
-                    background=C_SURFACE, foreground=C_MUTED)
-    style.layout("Flat.Vertical.TScrollbar", style.layout("Vertical.TScrollbar"))
-    style.configure("Flat.Vertical.TScrollbar", background=C_SURFACE, troughcolor=C_BG,
-                    borderwidth=0, arrowsize=12)
-    return style
-
-
-def rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
-    """Canvas has no rounded rectangle; approximate one with a smoothed polygon."""
-    radius = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
-    points = [
-        x0 + radius, y0, x1 - radius, y0, x1, y0, x1, y0 + radius,
-        x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
-        x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
-    ]
-    return canvas.create_polygon(points, smooth=True, **kwargs)
-
-
-class ScrollableList(ttk.Frame):
-    """Vertically scrolling container that only shows its scrollbar when the
-    content actually overflows."""
-
-    def __init__(self, parent, **kwargs):
-        super().__init__(parent, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0, background=C_BG)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
-                                       style="Flat.Vertical.TScrollbar")
-        self.canvas.configure(yscrollcommand=self._on_scroll)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.inner = ttk.Frame(self.canvas)
-        self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
-        self.inner.bind("<MouseWheel>", self._on_wheel)
-
-    def _on_inner_configure(self, _event=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self._sync_scrollbar()
-
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfigure(self._window, width=event.width)
-        self._sync_scrollbar()
-
-    def _on_scroll(self, first, last):
-        self.scrollbar.set(first, last)
-        self._sync_scrollbar()
-
-    def _sync_scrollbar(self):
-        needed = self.inner.winfo_reqheight() > self.canvas.winfo_height()
-        if needed and not self.scrollbar.winfo_ismapped():
-            self.scrollbar.pack(side="right", fill="y")
-        elif not needed and self.scrollbar.winfo_ismapped():
-            self.scrollbar.pack_forget()
-
-    def _on_wheel(self, event):
-        if self.inner.winfo_reqheight() > self.canvas.winfo_height():
-            self.canvas.yview_scroll(int(-event.delta / 120), "units")
-
-    def clear(self):
-        for child in self.inner.winfo_children():
-            child.destroy()
 
 
 class FinanceManager:
@@ -473,15 +367,23 @@ class ProjectFinanceDialog(tk.Toplevel):
         middle = ttk.Frame(columns)
         middle.pack(side="left", fill="y", padx=(0, 26))
         ttk.Label(middle, text="COSTS", font=(UI_FONT, 8, "bold"), foreground=C_FAINT).pack(anchor="w")
-        ttk.Label(middle, text="by category", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(middle, text="by category  ·  Edit to set payees",
+                  style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
         self.category_labels = {}
         for key, label in ((QP.COST_LABOR, "Labor"), (QP.COST_MAINTENANCE, "Maintenance"),
                            (QP.COST_PROFIT, "Profit"), (QP.COST_REAGENTS, "Reagents")):
             row = ttk.Frame(middle)
             row.pack(fill="x", pady=5)
-            ttk.Label(row, text=label, width=14, font=(UI_FONT, 10)).pack(side="left")
-            amount = ttk.Label(row, text="-", width=15, anchor="e", font=(UI_FONT, 10))
+            ttk.Label(row, text=label, width=13, font=(UI_FONT, 10)).pack(side="left")
+            amount = ttk.Label(row, text="-", width=14, anchor="e", font=(UI_FONT, 10))
             amount.pack(side="left")
+            if key == QP.COST_PROFIT:
+                # Profit is always Quarium's, so there is nothing to attribute.
+                ttk.Label(row, text="", width=7).pack(side="left", padx=(8, 0))
+            else:
+                ttk.Button(row, text="Edit", style="Tiny.TButton", width=6,
+                           command=lambda k=key: self._edit_attribution(k)).pack(side="left",
+                                                                                 padx=(8, 0))
             self.category_labels[key] = amount
         ttk.Separator(middle, orient="horizontal").pack(fill="x", pady=8)
         total_row = ttk.Frame(middle)
@@ -523,6 +425,11 @@ class ProjectFinanceDialog(tk.Toplevel):
         self.flags[column] = not self.flags.get(column, False)
         self._save_flag(column, self.flags[column])
         self._refresh()
+
+    def _edit_attribution(self, cost_type):
+        QuariumAttribution.AttributionEditor(
+            self, self.project_id, cost_type, self.responsible,
+            self.current_user, on_change=self._refresh)
 
     def _toggle_bubble(self, payee_id, currently_paid):
         QP.set_settled(self.project_id, payee_id, not currently_paid, self.current_user)
