@@ -12,10 +12,13 @@ from QuariumUI import (C_BG, C_BORDER, C_DANGER, C_DONE, C_FAINT, C_MUTED, C_PRI
                        C_SURFACE, C_TEXT, C_TODO, UI_FONT, ScrollableList,
                        apply_modern_style, format_br_currency, rounded_rect)
 
-# When frozen by PyInstaller, __file__ resolves inside the temporary
-# extraction folder rather than the exe's real folder, so paths built from
-# it point at a throwaway location. Use the exe's directory instead.
-_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+# Working data lives under %LOCALAPPDATA%, not beside the program: keeping
+# live SQLite files inside the OneDrive-synced project folder meant two sync
+# engines replicating the same open databases. Source runs get a separate
+# workspace so testing cannot disturb live data.
+from QuariumPaths import data_dir
+
+_BASE_DIR = data_dir()
 
 ROW_HEIGHT = 34
 BAR_WIDTH = 258

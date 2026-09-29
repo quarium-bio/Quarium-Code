@@ -17,15 +17,13 @@ import urllib.error
 import re
 import secrets
 
-# When frozen by PyInstaller, __file__ resolves inside the temporary
-# extraction folder rather than the exe's real folder, so paths built from
-# it point at a throwaway location. Use the exe's directory instead, and
-# anchor the working directory there too so every bare relative path used
-# throughout this app (credentials.json, token.json, *.db, etc.) resolves
-# consistently regardless of how the exe was launched.
-_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-if getattr(sys, 'frozen', False):
-    os.chdir(_BASE_DIR)
+# Working data lives under %LOCALAPPDATA%, not beside the program: keeping
+# live SQLite files inside the OneDrive-synced project folder meant two sync
+# engines replicating the same open databases. Source runs get a separate
+# workspace so testing cannot disturb live data.
+from QuariumPaths import data_dir
+
+_BASE_DIR = data_dir()
 
 # Import the application classes
 from QuariumClientManager import ClientManager
@@ -2059,6 +2057,15 @@ if __name__ == "__main__":
             0x30,  # MB_ICONWARNING
         )
         sys.exit(0)
+
+    # Seed the workspace from the program folder the first time, then work
+    # from it. Anchoring the working directory here means every bare relative
+    # path in the app and in the Drive sync resolves inside the workspace.
+    import QuariumPaths
+    migrated = QuariumPaths.migrate_if_needed()
+    if migrated:
+        print(f"Set up {_BASE_DIR} with {len(migrated)} item(s) from the program folder.")
+    os.chdir(_BASE_DIR)
 
     root = tk.Tk()
     app = QuariumDashboard(root)
