@@ -1,3 +1,4 @@
+import datetime
 import os
 import sys
 import math
@@ -9,8 +10,9 @@ import tkinter.font as tkfont
 import QuariumPayees as QP
 import QuariumAttribution
 from QuariumUI import (C_BG, C_BORDER, C_DANGER, C_DONE, C_FAINT, C_MUTED, C_PRIMARY,
-                       C_SURFACE, C_TEXT, C_TODO, UI_FONT, ScrollableList,
-                       apply_modern_style, format_br_currency, rounded_rect)
+                       C_SURFACE, C_TEXT, C_TODO, DATE_HINT, UI_FONT, ScrollableList,
+                       apply_modern_style, describe_date, format_br_currency,
+                       parse_br_date, rounded_rect)
 
 # Working data lives under %LOCALAPPDATA%, not beside the program: keeping
 # live SQLite files inside the OneDrive-synced project folder meant two sync
@@ -26,6 +28,18 @@ SEG_GAP = 3
 COL_EST, COL_CLIENT, COL_TOTAL, COL_BAR = 16, 140, 330, 480
 HEADER_H = 92
 LABEL_ANGLE = 30
+
+# Totals are grouped by when the project was approved: that is the date the
+# work was committed to, and it is set for every project in the flow.
+PERIODS = [
+    ("All time", None),
+    ("Last 30 days", 30),
+    ("Last 3 months", 90),
+    ("Last 6 months", 180),
+    ("Last year", 365),
+    ("Year to date", "ytd"),
+    ("Custom...", "custom"),
+]
 
 
 class FinanceManager:
@@ -82,6 +96,41 @@ class FinanceManager:
         totals_head = ttk.Frame(main)
         totals_head.pack(fill="x")
         ttk.Label(totals_head, text="Overall Summary", style="Section.TLabel").pack(side="left")
+
+        # The totals answer "how much over what period", so the period belongs
+        # next to them rather than filtering the list above.
+        ttk.Label(totals_head, text="Period:", style="Muted.TLabel").pack(side="left", padx=(18, 6))
+        self.period_var = tk.StringVar(value=PERIODS[0][0])
+        self.period_box = ttk.Combobox(totals_head, textvariable=self.period_var,
+                                       values=[label for label, _key in PERIODS],
+                                       state="readonly", width=16)
+        self.period_box.pack(side="left")
+        self.period_box.bind("<<ComboboxSelected>>", self._on_period_change)
+
+        self.custom_frame = ttk.Frame(totals_head)
+        ttk.Label(self.custom_frame, text="from").pack(side="left", padx=(10, 4))
+        self.from_var = tk.StringVar()
+        from_entry = ttk.Entry(self.custom_frame, textvariable=self.from_var, width=11)
+        from_entry.pack(side="left")
+        ttk.Label(self.custom_frame, text="to").pack(side="left", padx=(6, 4))
+        self.to_var = tk.StringVar()
+        to_entry = ttk.Entry(self.custom_frame, textvariable=self.to_var, width=11)
+        to_entry.pack(side="left")
+        ttk.Button(self.custom_frame, text="Apply", command=self.load_financial_data,
+                   style="Flat.TButton").pack(side="left", padx=(8, 0))
+        for entry in (from_entry, to_entry):
+            entry.bind("<Return>", lambda e: self.load_financial_data())
+        for var in (self.from_var, self.to_var):
+            var.trace_add("write", lambda *a: self._echo_dates())
+
+        # Dates are written day-first here and month-first in the United
+        # States, so the entry is labelled and whatever was typed is spelled
+        # back out. 03/05 should never have to be guessed at.
+        self.date_hint = ttk.Label(main, text="", style="Muted.TLabel")
+
+        self.totals_caption = ttk.Label(main, text="", style="Muted.TLabel")
+        self.totals_caption.pack(anchor="w", pady=(6, 0))
+
         self.totals_frame = ttk.Frame(main)
         self.totals_frame.pack(fill="x", pady=(8, 0))
         self.totals_tree = ttk.Treeview(self.totals_frame, columns=("Amount",),
@@ -116,6 +165,60 @@ class FinanceManager:
         return [bool(project_row.get(col)) if col else settled
                 for col, _letter, _label in QP.SEGMENTS]
 
+    # ---------------------------------------------------------------- period
+
+    def _on_period_change(self, _event=None):
+        if dict(PERIODS).get(self.period_var.get()) == "custom":
+            self.custom_frame.pack(side="left")
+            self.date_hint.pack(anchor="w", pady=(4, 0), before=self.totals_caption)
+            self._echo_dates()
+        else:
+            self.custom_frame.pack_forget()
+            self.date_hint.pack_forget()
+        self.load_financial_data()
+
+    def _echo_dates(self):
+        """Spells the typed dates back out, so a day-first reading is visible."""
+        if dict(PERIODS).get(self.period_var.get()) != "custom":
+            return
+        parts = [f"Type dates as {DATE_HINT}."]
+        for label, var in (("From", self.from_var), ("To", self.to_var)):
+            text = var.get().strip()
+            if not text:
+                continue
+            parsed = parse_br_date(text)
+            parts.append(f"{label}: {describe_date(parsed)}" if parsed
+                         else f"{label}: '{text}' is not a date I can read")
+        self.date_hint.config(text="   ".join(parts))
+
+    def _period_bounds(self):
+        """Returns (start, end, label). Either bound may be None for open."""
+        key = dict(PERIODS).get(self.period_var.get())
+        today = datetime.date.today()
+        if key is None:
+            return None, None, "all time"
+        if key == "ytd":
+            return datetime.date(today.year, 1, 1), today, f"year to date ({today.year})"
+        if key == "custom":
+            start = parse_br_date(self.from_var.get())
+            end = parse_br_date(self.to_var.get())
+            if start and end and start > end:
+                start, end = end, start
+            described = " to ".join(x for x in (describe_date(start), describe_date(end)) if x)
+            return start, end, described or "custom (no dates entered)"
+        start = today - datetime.timedelta(days=key)
+        return start, today, self.period_var.get().lower()
+
+    @staticmethod
+    def _project_date(approved_at, created_at):
+        for value in (approved_at, created_at):
+            if value:
+                try:
+                    return datetime.datetime.strptime(str(value).split()[0], '%Y-%m-%d').date()
+                except ValueError:
+                    continue
+        return None
+
     def load_financial_data(self):
         self._clear_hover()
         self.canvas.delete("all")
@@ -135,7 +238,7 @@ class FinanceManager:
                 SELECT p.id, p.estimate_number, c.name, p.responsible_user,
                        COALESCE(p.data_sent_to_client, 0), COALESCE(p.data_approved_by_client, 0),
                        COALESCE(p.invoice_sent, 0), COALESCE(p.boleto_sent, 0),
-                       COALESCE(p.invoice_paid, 0)
+                       COALESCE(p.invoice_paid, 0), p.approved_at, p.created_at
                 FROM projects p
                 LEFT JOIN clients_db.clients c ON p.client_id = c.id
                 WHERE p.status > 0
@@ -148,22 +251,42 @@ class FinanceManager:
             messagebox.showerror("Database Error", f"Could not load financial data: {e}")
             return
 
-        y = 4
-        for (p_id, est_num, client, responsible, a_sent, b_appr, c_nf, d_bol, e_paid) in projects:
+        start, end, period_label = self._period_bounds()
+        counted = 0
+
+        prepared = []
+        for (p_id, est_num, client, responsible, a_sent, b_appr, c_nf, d_bol,
+             e_paid, approved_at, created_at) in projects:
             lines, profit = QP.calculate_cost_lines(p_id)
-            for line in lines:
-                totals[line['cost_type']] = totals.get(line['cost_type'], 0.0) + line['amount']
-            totals[QP.COST_PROFIT] += profit
             project_total = sum(l['amount'] for l in lines) + profit
-            grand += project_total
+
+            when = self._project_date(approved_at, created_at)
+            in_period = ((start is None or (when is not None and when >= start)) and
+                         (end is None or (when is not None and when <= end)))
+            if in_period:
+                counted += 1
+                for line in lines:
+                    totals[line['cost_type']] = totals.get(line['cost_type'], 0.0) + line['amount']
+                totals[QP.COST_PROFIT] += profit
+                grand += project_total
 
             settled = QP.all_settled(p_id, responsible)
             state = self._segment_state({
                 'data_sent_to_client': a_sent, 'data_approved_by_client': b_appr,
                 'invoice_sent': c_nf, 'boleto_sent': d_bol, 'invoice_paid': e_paid,
             }, settled)
-            self._draw_row(y, p_id, est_num, client or "Desconhecido", project_total,
-                           state, responsible)
+            prepared.append({'id': p_id, 'est': est_num, 'client': client or "Desconhecido",
+                             'total': project_total, 'state': state,
+                             'responsible': responsible, 'done': all(state)})
+
+        # Finished business sinks to the bottom: a project with all six stages
+        # filled needs nothing, so it should not sit between the ones that do.
+        prepared.sort(key=lambda r: (r['done'], -r['id']))
+
+        y = 4
+        for row in prepared:
+            self._draw_row(y, row['id'], row['est'], row['client'], row['total'],
+                           row['state'], row['responsible'])
             y += ROW_HEIGHT
 
         self.canvas.configure(scrollregion=(0, 0, COL_BAR + BAR_WIDTH + 90, max(y, 10)))
@@ -172,6 +295,12 @@ class FinanceManager:
                            ("Maintenance", QP.COST_MAINTENANCE), ("Profit", QP.COST_PROFIT)):
             self.totals_tree.insert("", "end", text=label, values=(format_br_currency(totals[key]),))
         self.totals_tree.insert("", "end", text="TOTAL", values=(format_br_currency(grand),))
+
+        settled_count = sum(1 for r in prepared if r['done'])
+        caption = f"Totals cover {counted} of {len(prepared)} projects — {period_label}."
+        if settled_count:
+            caption += f"  {settled_count} fully settled, moved to the bottom of the list."
+        self.totals_caption.config(text=caption)
 
     def _fit(self, text, max_px):
         """Truncates to the measured pixel width so a long client name cannot

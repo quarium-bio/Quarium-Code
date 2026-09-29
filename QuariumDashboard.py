@@ -234,7 +234,17 @@ class QuariumDashboard:
             if hasattr(self, 'splash') and self.splash.winfo_exists():
                 self.splash_status_label.config(text=text)
                 self.splash_progress['value'] = value
-        self.root.after(0, do_update)
+                # Repaint now. The UI build runs straight through on the main
+                # thread without the loop ever going idle, so queueing this
+                # would show nothing until the splash had already gone.
+                try:
+                    self.splash.update_idletasks()
+                except tk.TclError:
+                    pass
+        if threading.current_thread() is threading.main_thread():
+            do_update()
+        else:
+            self.root.after(0, do_update)
         
     def check_updates(self):
         try:
@@ -964,11 +974,17 @@ class QuariumDashboard:
             self.do_sync_down_and_finish(read_only=False)
 
     def finish_init(self):
+        # Build the interface while the splash is still up. Tearing it down
+        # first left a bare desktop for the several seconds the nine managers
+        # take to construct, with the login window already gone -- which reads
+        # as the application having crashed.
+        self.update_splash("Loading modules...", 78)
+        self.create_ui()
+        self.update_splash("Ready", 100)
+
         if hasattr(self, 'splash') and self.splash.winfo_exists():
             self.splash.destroy()
 
-        self.root.deiconify() # Show main window
-        
         window_width = 1200
         window_height = 800
         screen_width = self.root.winfo_screenwidth()
@@ -976,14 +992,14 @@ class QuariumDashboard:
         center_x = int((screen_width / 2) - (window_width / 2))
         center_y = int((screen_height / 2) - (window_height / 2))
         self.root.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
-        
+
+        self.root.deiconify() # Show main window, now that it is built
+
         try:
             self.root.state('zoomed') # Maximize the window on Windows
         except tk.TclError:
             pass
-        
-        self.create_ui()
-        
+
         logo_path = asset_path('QLogo.png')
         if logo_path:
             try:
@@ -1153,7 +1169,9 @@ class QuariumDashboard:
         self.current_view = tk.StringVar(value="Projects")
         
         # Create navigation buttons and app frames
-        for app_id, title, app_class, kwargs in app_definitions:
+        for position, (app_id, title, app_class, kwargs) in enumerate(app_definitions):
+            self.update_splash(f"Loading {title}...",
+                               78 + int(20 * position / len(app_definitions)))
             # Navigation button (acting like a tab using the Toolbutton style)
             btn = ttk.Radiobutton(
                 nav_holder,

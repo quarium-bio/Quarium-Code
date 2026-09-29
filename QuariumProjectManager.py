@@ -175,7 +175,8 @@ class ProjectManager:
         flow_columns = ['status INTEGER DEFAULT 0', 'approved_at TEXT', 'agreed_business_days INTEGER', 
                         'contract_sent_at TEXT', 'contract_signed_at TEXT', 'samples_received_at TEXT', 
                         'sample_storage_location TEXT', 'samples_analyzed_at TEXT', 'data_released_at TEXT', 
-                        'data_link TEXT', 'deletion_threshold_months INTEGER DEFAULT 3', 'completed_at TEXT']
+                        'data_link TEXT', 'deletion_threshold_months INTEGER DEFAULT 3', 'completed_at TEXT',
+                        'approved_by TEXT']
         for col in flow_columns:
             try: self.cursor.execute(f'ALTER TABLE projects ADD COLUMN {col}')
             except sqlite3.OperationalError: pass
@@ -219,6 +220,14 @@ class ProjectManager:
         self.user_var = tk.StringVar()
         self.user_combobox = ttk.Combobox(left_panel, textvariable=self.user_var, state="readonly", width=30)
         self.user_combobox.grid(row=3, column=1, columnspan=2, padx=5, pady=2)
+
+        # Responsible, author and approver are three different people and the
+        # dropdown only shows the first. Spelling the other two out stops an
+        # approved estimate looking as though the approver had written it.
+        self.provenance_var = tk.StringVar()
+        self.provenance_label = ttk.Label(left_panel, textvariable=self.provenance_var,
+                                          foreground="#6B7280")
+        self.provenance_label.grid(row=7, column=0, columnspan=3, sticky="w", padx=5, pady=(8, 0))
 
         # Total Samples for Project
         ttk.Label(left_panel, text="Total Samples:").grid(row=4, column=0, sticky="w", pady=2)
@@ -906,12 +915,31 @@ class ProjectManager:
         ttk.Button(btn_frame, text="Load Version", command=load_selected_version).pack(side="right")
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
 
+    def _display_name(self, who):
+        """users.json keys are usernames; the interface talks in full names."""
+        if not who:
+            return ""
+        return getattr(self, 'username_to_full', {}).get(who, who)
+
+    def _describe_provenance(self, saved_by, approved_by, approved_at):
+        parts = []
+        if saved_by:
+            parts.append(f"Saved by {self._display_name(saved_by)}")
+        if approved_by:
+            when = f" on {approved_at.split()[0]}" if approved_at else ""
+            parts.append(f"approved by {self._display_name(approved_by)}{when}")
+        elif approved_at:
+            # Approved before the approver was recorded.
+            parts.append(f"approved on {approved_at.split()[0]} (approver not recorded)")
+        return "  ·  ".join(parts)
+
     def load_project(self, estimate_number):
         self.clear_form() # Clear current form before loading new data
 
         self.cursor.execute('''
             SELECT p.id, p.client_id, p.validity_days, p.responsible_user, p.total_samples,
-                   p.discount_percentage, p.final_cost, c.name, c.is_academic, comp.code, p.status
+                   p.discount_percentage, p.final_cost, c.name, c.is_academic, comp.code, p.status,
+                   p.updated_by, p.approved_by, p.approved_at
             FROM projects p
             LEFT JOIN clients_db.clients c ON p.client_id = c.id
             LEFT JOIN clients_db.companies comp ON c.company_id = comp.id
@@ -924,10 +952,13 @@ class ProjectManager:
             return
 
         (project_id, client_id, validity_days, responsible_user, total_samples,
-         discount_percentage, final_cost, client_name, is_academic, company_code, status) = project_data
+         discount_percentage, final_cost, client_name, is_academic, company_code, status,
+         saved_by, approved_by, approved_at) = project_data
 
         if hasattr(self, 'username_to_full') and responsible_user in self.username_to_full:
             responsible_user = self.username_to_full[responsible_user]
+
+        self.provenance_var.set(self._describe_provenance(saved_by, approved_by, approved_at))
 
         self.current_project_id = project_id
         self.estimate_number_var.set(estimate_number)
@@ -965,7 +996,7 @@ class ProjectManager:
         dialog.title("Confirm Deletion")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("400x180")
+        dialog.resizable(False, False)
 
         msg = f"Multiple versions exist for estimate '{base_estimate}'.\nWhat would you like to delete?"
         ttk.Label(dialog, text=msg, justify='left').pack(padx=20, pady=10)
@@ -979,11 +1010,14 @@ class ProjectManager:
         ttk.Button(btn_frame, text=f"Delete ALL Versions for '{base_estimate}'", command=lambda: [result.set('all'), dialog.destroy()]).pack(fill='x', padx=20, pady=5)
         ttk.Button(btn_frame, text="Cancel", command=lambda: [result.set('cancel'), dialog.destroy()]).pack(fill='x', padx=20, pady=5)
 
-        # Center dialog
+        # Size to the content and then centre. A fixed 400x180 cut the Cancel
+        # button off the bottom, and winfo_width is still 1 before the window
+        # is mapped, so the requested size is what to measure.
         dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
+        w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() // 2) - (w // 2)
+        y = self.root.winfo_rooty() + (self.root.winfo_height() // 2) - (h // 2)
+        dialog.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
 
         self.root.wait_window(dialog)
         return result.get()
@@ -1064,6 +1098,7 @@ class ProjectManager:
         self.discount_percentage_var.set(0.0)
         self.estimated_total_cost_var.set("R$ 0.00")
         self.service_samples_override_var.set("")
+        self.provenance_var.set("")
         self.approve_btn.pack_forget()
 
         for item in self.project_services_tree.get_children():
@@ -1407,11 +1442,14 @@ class ProjectManager:
             
         try:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Record who approved it. Approving is not the same as owning the
+            # work, and without this the only name against a project is the
+            # responsible user, so an approver looks like the originator.
             self.cursor.execute('''
-                UPDATE projects 
-                SET status = 1, approved_at = ?, agreed_business_days = ?
+                UPDATE projects
+                SET status = 1, approved_at = ?, agreed_business_days = ?, approved_by = ?
                 WHERE id = ?
-            ''', (now, days, self.current_project_id))
+            ''', (now, days, self.current_user, self.current_project_id))
             self.conn.commit()
             
             self.approve_btn.pack_forget()

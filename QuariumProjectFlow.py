@@ -115,7 +115,8 @@ class ProjectFlowManager:
                         'sample_storage_location TEXT', 'samples_analyzed_at TEXT', 'data_released_at TEXT', 
                         'data_link TEXT', 'deletion_threshold_months INTEGER DEFAULT 3', 'completed_at TEXT',
                         'invoice_sent INTEGER DEFAULT 0', 'invoice_paid INTEGER DEFAULT 0', 'invoice_paid_date TEXT',
-                        'lnp_emitted INTEGER DEFAULT 0', 'lnp_paid INTEGER DEFAULT 0', 'lnp_paid_date TEXT']
+                        'lnp_emitted INTEGER DEFAULT 0', 'lnp_paid INTEGER DEFAULT 0', 'lnp_paid_date TEXT',
+                        'approved_by TEXT']
         for col in flow_columns:
             try: self.cursor.execute(f'ALTER TABLE projects ADD COLUMN {col}')
             except sqlite3.OperationalError: pass

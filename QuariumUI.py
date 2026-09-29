@@ -1,5 +1,8 @@
 """Shared look-and-feel helpers for the finance screens."""
 
+import datetime
+import itertools
+import re
 import tkinter as tk
 from tkinter import ttk
 
@@ -64,15 +67,100 @@ def apply_modern_style(widget):
     return style
 
 
+MONTHS_PT = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+             "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+DATE_HINT = "DD/MM/AAAA  (dia primeiro, como 31/01/2026)"
+
+
+def parse_br_date(text):
+    """Reads a date written the Brazilian way: day first.
+
+    31/01/2026, 31-01-2026 and 31.01.2026 all work, and so does the ISO
+    2026-01-31, which is unambiguous in any locale. A two-digit year means
+    20xx. Returns None when the text cannot be read as a date.
+
+    Day-first matters: 03/05/2026 is 3 May here and 5 March in the United
+    States, so callers should show describe_date() back to the user rather
+    than let them guess which reading they got.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    # ISO first: a four-digit leading group can only be a year.
+    iso = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', text)
+    if iso:
+        year, month, day = (int(g) for g in iso.groups())
+    else:
+        parts = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$', text)
+        if not parts:
+            return None
+        day, month, year = (int(g) for g in parts.groups())
+        if year < 100:
+            year += 2000
+    try:
+        return datetime.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def describe_date(value):
+    """Spells a date out, so which reading was taken is never in doubt."""
+    if value is None:
+        return ""
+    return f"{value.day} de {MONTHS_PT[value.month - 1]} de {value.year}"
+
+
+def format_br_date(value):
+    return value.strftime("%d/%m/%Y") if value else ""
+
+
+_ROUNDED_SEQ = itertools.count()
+
+
 def rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
-    """Canvas has no rounded rectangle; approximate one with a smoothed polygon."""
-    radius = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
-    points = [
-        x0 + radius, y0, x1 - radius, y0, x1, y0, x1, y0 + radius,
-        x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
-        x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
-    ]
-    return canvas.create_polygon(points, smooth=True, **kwargs)
+    """Canvas has no rounded rectangle, so build one that keeps its edges.
+
+    A smoothed polygon looks right at a glance, but Tk treats its points as
+    spline control points rather than points the curve passes through: the
+    straight edges bow outwards and the corners spill a pixel or two past the
+    box. At the 14px height these segments are drawn at, that reads as stray
+    pixels escaping the shape.
+
+    Two overlapping rectangles plus four corner arcs land exactly on the
+    coordinates asked for. Returns a tag covering every piece, so callers can
+    keep using itemconfig and delete on the single value they get back.
+    """
+    radius = max(0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
+    tag = f"rr{next(_ROUNDED_SEQ)}"
+    tags = kwargs.pop('tags', ())
+    if isinstance(tags, str):
+        tags = (tags,)
+    tags = tuple(tags) + (tag,)
+    # Arcs take an outline, rectangles take one too; an explicit empty outline
+    # would leave hairlines between the pieces, so each piece is drawn in the
+    # fill colour instead.
+    fill = kwargs.pop('fill', '')
+    kwargs.pop('outline', None)
+
+    # width=0 everywhere: a stroke is centred on the boundary, so any outline
+    # at all puts half its thickness outside the rectangle asked for.
+    if radius <= 0:
+        canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=fill, width=0,
+                                tags=tags, **kwargs)
+        return tag
+
+    d = radius * 2
+    canvas.create_rectangle(x0 + radius, y0, x1 - radius, y1,
+                            fill=fill, outline=fill, width=0, tags=tags, **kwargs)
+    canvas.create_rectangle(x0, y0 + radius, x1, y1 - radius,
+                            fill=fill, outline=fill, width=0, tags=tags, **kwargs)
+    for cx, cy, start in ((x0, y0, 90), (x1 - d, y0, 0),
+                          (x0, y1 - d, 180), (x1 - d, y1 - d, 270)):
+        canvas.create_arc(cx, cy, cx + d, cy + d, start=start, extent=90,
+                          style="pieslice", fill=fill, outline=fill, width=0,
+                          tags=tags, **kwargs)
+    return tag
 
 
 class ScrollableList(ttk.Frame):
