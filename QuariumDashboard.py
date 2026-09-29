@@ -338,10 +338,18 @@ class QuariumDashboard:
             self.root.after(0, self.show_connection_manager)
 
     def continue_startup_after_conn_manager(self):
-        self.root.after(0, self.authenticate_and_sync)
+        # authenticate_and_sync is written for a worker thread: it marshals
+        # every dialog back with after(). Running it on the main thread instead
+        # froze the window for the whole OAuth round trip and the first sync,
+        # so nothing was drawn while the browser waited for consent.
+        threading.Thread(target=self.authenticate_and_sync, daemon=True).start()
 
     def show_connection_manager(self):
         self.root.withdraw()
+        # Distinguishes "the user closed this window without connecting" from
+        # "a connection is under way". current_user is not set until the login
+        # dialog, long after this window has gone, so it cannot answer that.
+        self.connection_started = False
         conn_win = tk.Toplevel(self.root)
         conn_win.title("Connection Manager")
         conn_win.geometry("450x420")
@@ -370,8 +378,9 @@ class QuariumDashboard:
                     config["active_company"] = sel
                     self.save_local_config(config)
                     self.apply_profile(sel, config)
+                    self.connection_started = True
                     conn_win.destroy()
-                    self.authenticate_and_sync()
+                    self.continue_startup_after_conn_manager()
                     
             ttk.Button(conn_win, text="Connect", command=connect_existing, style="Accent.TButton").pack(pady=5)
         
@@ -394,6 +403,7 @@ class QuariumDashboard:
                 self.save_local_config(config)
                 self.apply_profile(comp_name, config)
                 self.update_splash(f"Connecting to '{comp_name}'...", 40)
+                self.connection_started = True
                 conn_win.destroy()
                 self.continue_startup_after_conn_manager()
             except Exception as e:
@@ -403,7 +413,11 @@ class QuariumDashboard:
         ttk.Button(conn_win, text="How to create credentials.json (Tutorial)", command=self.show_tutorial).pack(pady=5)
         
         self.root.wait_window(conn_win)
-        if not getattr(self, 'current_user', None):
+        # Close only if the window was dismissed without starting a connection.
+        # Testing current_user here used to queue root.destroy even on success,
+        # and because that ran before the login dialog it tore the application
+        # down just as authentication finished.
+        if not getattr(self, 'connection_started', False) and not getattr(self, 'current_user', None):
             self.root.after(0, self.root.destroy)
 
     def authenticate_and_sync(self):
