@@ -222,8 +222,21 @@ class QuariumDashboard:
             logo_label.pack(pady=(20, 10))
 
         ttk.Label(splash_frame, text="Quarium Dashboard", font=('Helvetica', 16, 'bold')).pack()
-        self.splash_status_label = ttk.Label(splash_frame, text="Initializing...", font=('Helvetica', 10))
-        self.splash_status_label.pack(pady=(20, 5))
+
+        # The status text changes at every step, and a label that resizes with
+        # its text leaves the strip it used to occupy unpainted. There is no
+        # title bar here, so no window manager forces a repaint, and the old
+        # messages stay on screen stacked under the new one. Pin the strip to a
+        # constant size and give it an opaque background of its own, so each
+        # redraw covers everything drawn before it.
+        status_bg = ttk.Style().lookup('TFrame', 'background') or 'SystemButtonFace'
+        status_holder = tk.Frame(splash_frame, height=24, background=status_bg)
+        status_holder.pack(fill="x", padx=20, pady=(20, 5))
+        status_holder.pack_propagate(False)
+        self.splash_status_label = tk.Label(status_holder, text="Initializing...",
+                                            font=('Helvetica', 10), background=status_bg,
+                                            anchor="center")
+        self.splash_status_label.pack(fill="both", expand=True)
         
         self.splash_progress = ttk.Progressbar(splash_frame, orient="horizontal", length=300, mode='determinate')
         self.splash_progress.pack(pady=10)
