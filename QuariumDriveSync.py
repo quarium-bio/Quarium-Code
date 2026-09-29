@@ -28,6 +28,22 @@ except ImportError:
 
 SCOPES = ['https://www.googleapis.com/auth/drive.appdata']
 
+
+def has_client_secrets(path='credentials.json'):
+    """True when the file holds a usable OAuth client ID.
+
+    Existence alone is not enough. A company profile saved without credentials
+    used to leave a zero-byte file here, which passed an exists() check and
+    then failed with a parse error deep inside the OAuth flow.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    section = data.get('installed') or data.get('web') or {}
+    return bool(section.get('client_id'))
+
 class DriveSyncManager:
     def __init__(self):
         self.creds = None
@@ -41,7 +57,17 @@ class DriveSyncManager:
     def authenticate(self):
         with self.api_lock:
             if os.path.exists('token.json'):
-                self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                try:
+                    self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                except (OSError, ValueError) as e:
+                    # An empty or truncated token is not a reason to fail the
+                    # whole start-up; discard it and sign in again.
+                    print(f"Ignoring unreadable token.json: {e}")
+                    self.creds = None
+                    try:
+                        os.remove('token.json')
+                    except OSError:
+                        pass
             if not self.creds or not self.creds.valid:
                 if self.creds and self.creds.expired and self.creds.refresh_token:
                     try:
@@ -52,8 +78,11 @@ class DriveSyncManager:
                             os.remove('token.json')
                 
                 if not self.creds or not self.creds.valid:
-                    if not os.path.exists('credentials.json'):
-                        raise FileNotFoundError("credentials.json not found. Please obtain OAuth 2.0 client ID from Google Cloud Console.")
+                    if not has_client_secrets('credentials.json'):
+                        raise FileNotFoundError(
+                            "No Google credentials are set up for this workspace.\n\n"
+                            "Use Load New credentials.json in the Connection Manager, "
+                            "with an OAuth 2.0 client ID from the Google Cloud Console.")
                     flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                     self.creds = flow.run_local_server(port=0)
                     with open('token.json', 'w') as token:

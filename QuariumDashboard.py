@@ -283,8 +283,15 @@ class QuariumDashboard:
             self.save_local_config(config)
         prof = config["companies"].get(comp_name)
         if not prof: return
-        with open("credentials.json", "w") as f:
-            f.write(prof.get("credentials", ""))
+        creds = (prof.get("credentials") or "").strip()
+        if creds:
+            with open("credentials.json", "w") as f:
+                f.write(creds)
+        elif os.path.exists("credentials.json"):
+            # Writing an empty file here is worse than writing nothing: the sync
+            # manager only checks that the path exists, so a blank file reads as
+            # a configured connection and then fails inside the OAuth flow.
+            os.remove("credentials.json")
         if prof.get("token"):
             with open("token.json", "w") as f:
                 f.write(prof["token"])
@@ -316,7 +323,13 @@ class QuariumDashboard:
             self.save_local_config(config)
             
         active = config.get("active_company")
-        if active and active in config["companies"] and not getattr(self, 'force_disconnect', False):
+        profile = config["companies"].get(active) if active else None
+        # A source checkout is seeded with its credentials stripped, so that
+        # testing a branch cannot reach the live Drive by accident. That profile
+        # is not something to connect with: fall through to the Connection
+        # Manager, where a credentials.json can be loaded deliberately.
+        has_credentials = bool(profile and (profile.get("credentials") or "").strip())
+        if has_credentials and not getattr(self, 'force_disconnect', False):
             self.update_splash(f"Connecting to '{active}'...", 30)
             self.apply_profile(active, config)
             self.authenticate_and_sync()
@@ -339,12 +352,16 @@ class QuariumDashboard:
         ttk.Label(conn_win, text="Welcome to Quarium", font=("Helvetica", 14, "bold")).pack(pady=10)
         ttk.Label(conn_win, text="Select an existing company profile or load a new credentials.json file to connect.", wraplength=400, justify="center").pack(pady=10)
         
-        if config["companies"]:
+        # Only profiles that actually carry credentials can be connected with.
+        # Offering one that cannot would just fail later in the OAuth flow.
+        connectable = [name for name, prof in config["companies"].items()
+                       if (prof.get("credentials") or "").strip()]
+        if connectable:
             ttk.Label(conn_win, text="Saved Companies:").pack(pady=(10,0))
             comp_var = tk.StringVar()
-            cb = ttk.Combobox(conn_win, textvariable=comp_var, values=list(config["companies"].keys()), state="readonly", width=30)
+            cb = ttk.Combobox(conn_win, textvariable=comp_var, values=connectable, state="readonly", width=30)
             cb.pack(pady=5)
-            if config.get("active_company") in config["companies"]:
+            if config.get("active_company") in connectable:
                 cb.set(config["active_company"])
             
             def connect_existing():
@@ -403,10 +420,16 @@ class QuariumDashboard:
             try:
                 self.drive_sync = DriveSyncManager()
             except ImportError as e:
-                self.root.after(0, lambda: messagebox.showwarning("Sync Dependencies Missing", f"{e}\n\nOperating in local mode."))
+                detail = str(e)
+                self.root.after(0, lambda: messagebox.showwarning("Sync Dependencies Missing", f"{detail}\n\nOperating in local mode."))
                 self.drive_sync = None
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Sync Error", f"An unexpected error occurred during Google Drive sync: {e}\n\nOperating in local mode."))
+                # Format the message now. `e` is unbound once the except block
+                # ends, so a lambda that reads it later dies with NameError and
+                # hides the very failure it was meant to report.
+                detail = f"{type(e).__name__}: {e}"
+                print("Drive sync failed:", detail)
+                self.root.after(0, lambda: messagebox.showerror("Sync Error", f"An unexpected error occurred during Google Drive sync:\n\n{detail}\n\nOperating in local mode."))
                 self.drive_sync = None
         else:
             self.root.after(0, lambda: messagebox.showinfo("Local Mode", "QuariumDriveSync not found or Google API libraries missing. Operating locally."))
