@@ -15,6 +15,7 @@ from QuariumProjectFlow import ProjectFlowManager
 # engines replicating the same open databases. Source runs get a separate
 # workspace so testing cannot disturb live data.
 from QuariumPaths import data_dir
+import QuariumCancellation as QC
 
 _BASE_DIR = data_dir()
 
@@ -314,13 +315,17 @@ class ProjectManager:
         self.tab_saved = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_saved, text="Saved Estimates")
         
-        self.saved_tree = ttk.Treeview(self.tab_saved, columns=("Client", "Cost", "Date", "User", "Versions"), height=15)
+        self.saved_tree = ttk.Treeview(self.tab_saved, columns=("Client", "Cost", "Date", "User", "Versions", "State"), height=15)
         self.saved_tree.heading("#0", text="Company / Estimate #")
         self.saved_tree.heading("Client", text="Client")
         self.saved_tree.heading("Cost", text="Total Cost")
         self.saved_tree.heading("Date", text="Date Created")
         self.saved_tree.heading("User", text="User")
         self.saved_tree.heading("Versions", text="Versions")
+        self.saved_tree.heading("State", text="State")
+        # A cancelled project still belongs in this list -- that is the point of
+        # cancelling rather than deleting -- but it must not read as live work.
+        self.saved_tree.tag_configure("cancelled", foreground="#B00020")
         
         self.saved_tree.column("#0", width=250)
         self.saved_tree.column("Client", width=150)
@@ -328,6 +333,7 @@ class ProjectManager:
         self.saved_tree.column("Date", width=150)
         self.saved_tree.column("User", width=100)
         self.saved_tree.column("Versions", width=80, anchor="center")
+        self.saved_tree.column("State", width=90, anchor="center")
         self.saved_tree.pack(fill="both", expand=True, pady=(0, 10))
 
         self.saved_tree.bind("<Double-1>", self.on_saved_estimate_double_click)
@@ -783,7 +789,8 @@ class ProjectManager:
                         comp.name as company_name,
                         SUBSTR(p.estimate_number, 1, INSTR(p.estimate_number, 'v') - 1) as base_estimate,
                         COUNT(*) OVER(PARTITION BY SUBSTR(p.estimate_number, 1, INSTR(p.estimate_number, 'v') - 1)) as version_count,
-                        ROW_NUMBER() OVER(PARTITION BY SUBSTR(p.estimate_number, 1, INSTR(p.estimate_number, 'v') - 1) ORDER BY CAST(SUBSTR(p.estimate_number, INSTR(p.estimate_number, 'v') + 1) AS INTEGER) DESC) as rn
+                        ROW_NUMBER() OVER(PARTITION BY SUBSTR(p.estimate_number, 1, INSTR(p.estimate_number, 'v') - 1) ORDER BY CAST(SUBSTR(p.estimate_number, INSTR(p.estimate_number, 'v') + 1) AS INTEGER) DESC) as rn,
+                        p.status as proj_status
                     FROM projects p
                     LEFT JOIN clients_db.clients c ON p.client_id = c.id
                     LEFT JOIN clients_db.companies comp ON c.company_id = comp.id
@@ -802,7 +809,11 @@ class ProjectManager:
                     node = self.saved_tree.insert("", "end", text=comp_name, open=True)
                     companies[comp_name] = node
                 versions_text = "[...]" if version_count > 1 else ""
-                self.saved_tree.insert(companies[comp_name], "end", text=estimate_number, values=(client_name or "", f"R$ {final_cost:.2f}", created_at or "", responsible_user or "", versions_text), tags=("project", estimate_number, base_estimate))  # type: ignore
+                proj_status = p[10] if len(p) > 10 else 0
+                cancelled = proj_status == QC.STATUS_CANCELLED
+                state_text = "Cancelled" if cancelled else ""
+                tags = ("project", estimate_number, base_estimate) + (("cancelled",) if cancelled else ())
+                self.saved_tree.insert(companies[comp_name], "end", text=estimate_number, values=(client_name or "", f"R$ {final_cost:.2f}", created_at or "", responsible_user or "", versions_text, state_text), tags=tags)  # type: ignore
         except sqlite3.Error as e:
             messagebox.showerror("Database Error", f"Could not load saved estimates: {e}")
 

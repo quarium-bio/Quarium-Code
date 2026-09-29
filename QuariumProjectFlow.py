@@ -12,8 +12,76 @@ import math
 # engines replicating the same open databases. Source runs get a separate
 # workspace so testing cannot disturb live data.
 from QuariumPaths import data_dir
+import QuariumCancellation as QC
 
 _BASE_DIR = data_dir()
+
+
+class CancelProjectDialog(tk.Toplevel):
+    """Asks what to do with an approved project, with its history in view.
+
+    Deleting is the only other way out and it takes the estimate, the
+    services and any recorded payment with it, so both choices here keep
+    everything and differ only in where the project ends up.
+    """
+
+    def __init__(self, parent, summary):
+        super().__init__(parent)
+        self.title("Cancel Project")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = None
+
+        body = ttk.Frame(self, padding=16)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text=f"Cancel {summary['estimate_number']}",
+                  font=('Helvetica', 13, 'bold')).pack(anchor="w")
+        ttk.Label(body, text=f"Currently at: {summary['stage']}",
+                  foreground="#555555").pack(anchor="w", pady=(2, 12))
+
+        self.choice = tk.StringVar(value="estimate")
+        ttk.Radiobutton(body, text="Return to estimate", value="estimate",
+                        variable=self.choice).pack(anchor="w")
+        ttk.Label(body, text="Editable again and shows the Approve button. Use this when\n"
+                             "the client wants changes before signing.",
+                  foreground="#555555").pack(anchor="w", padx=(22, 0), pady=(0, 10))
+
+        ttk.Radiobutton(body, text="Mark as cancelled", value="cancelled",
+                        variable=self.choice).pack(anchor="w")
+        ttk.Label(body, text="Leaves the flow and is kept on record in the Cancelled tab,\n"
+                             "where it can be restored to this stage later.",
+                  foreground="#555555").pack(anchor="w", padx=(22, 0), pady=(0, 10))
+
+        if summary['notes']:
+            warn = ttk.LabelFrame(body, text="Already recorded on this project", padding=10)
+            warn.pack(fill="x", pady=(4, 10))
+            for note in summary['notes']:
+                ttk.Label(warn, text="•  " + note, wraplength=430,
+                          justify="left").pack(anchor="w")
+            ttk.Label(warn, text="All of this is kept either way. Nothing here is deleted.",
+                      foreground="#1B5E20").pack(anchor="w", pady=(8, 0))
+
+        ttk.Label(body, text="Reason (optional):").pack(anchor="w")
+        self.reason = tk.StringVar()
+        ttk.Entry(body, textvariable=self.reason, width=58).pack(fill="x", pady=(2, 14))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Confirm", command=self._confirm,
+                   style="Accent.TButton").pack(side="right")
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right", padx=8)
+
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
+        y = parent.winfo_rooty() + 80
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.grab_set()
+
+    def _confirm(self):
+        self.result = (self.choice.get(), self.reason.get().strip())
+        self.destroy()
+
 
 class ProjectFlowManager:
     def __init__(self, root, current_user="Unknown", drive_sync=None):
@@ -56,7 +124,9 @@ class ProjectFlowManager:
         except sqlite3.OperationalError: pass
         try: self.cursor.execute('ALTER TABLE project_services ADD COLUMN executor TEXT')
         except sqlite3.OperationalError: pass
-            
+
+        QC.ensure_schema(self.conn)
+
         self.conn.commit()
 
     def load_settings(self):
@@ -116,6 +186,7 @@ class ProjectFlowManager:
         controls.pack(fill="x")
         ttk.Button(controls, text="Move Selected to Next Stage ➔", command=self.move_next, style="Accent.TButton").pack(side="right", padx=10)
         ttk.Button(controls, text="✎ Edit Stage Info", command=self.edit_info).pack(side="right", padx=10)
+        ttk.Button(controls, text="✕ Cancel Project", command=self.cancel_selected).pack(side="right", padx=10)
         ttk.Button(controls, text="Refresh Data", command=self.load_data).pack(side="left", padx=10)
 
         # Tab 2: Completed Projects
@@ -134,7 +205,35 @@ class ProjectFlowManager:
             
         self.tree_completed.pack(fill="both", expand=True)
         self.tree_completed.bind("<Double-1>", self.on_double_click)
-        
+
+        # Tab 3: Cancelled Projects
+        self.tab_cancelled = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_cancelled, text="Cancelled")
+
+        ttk.Label(self.tab_cancelled,
+                  text="Cancelled projects keep their estimate, services, costs and "
+                       "payment records. Restoring puts one back at the stage it left.",
+                  foreground="#555555", wraplength=760, justify="left").pack(anchor="w", pady=(0, 8))
+
+        self.tree_cancelled = ttk.Treeview(
+            self.tab_cancelled, columns=("Client", "Stage", "When", "By", "Reason"), height=14)
+        self.tree_cancelled.heading("#0", text="Estimate #")
+        for col, label, width in (("Client", "Client", 160), ("Stage", "Cancelled From", 150),
+                                  ("When", "Date", 100), ("By", "By", 100),
+                                  ("Reason", "Reason", 240)):
+            self.tree_cancelled.heading(col, text=label)
+            self.tree_cancelled.column(col, width=width,
+                                       anchor="w" if col in ("Client", "Reason") else "center")
+        self.tree_cancelled.column("#0", width=110)
+        self.tree_cancelled.pack(fill="both", expand=True)
+
+        cancel_controls = ttk.Frame(self.tab_cancelled, padding=(0, 8))
+        cancel_controls.pack(fill="x")
+        ttk.Button(cancel_controls, text="↩ Restore to Previous Stage",
+                   command=self.restore_selected, style="Accent.TButton").pack(side="right", padx=6)
+        ttk.Button(cancel_controls, text="Restore as Estimate",
+                   command=lambda: self.restore_selected(QC.STATUS_ESTIMATE)).pack(side="right", padx=6)
+
         self.tooltip = None
 
     def get_business_days(self, start_str, end_date=None):
@@ -160,7 +259,8 @@ class ProjectFlowManager:
             for item in tree.get_children(): tree.delete(item)
         for item in self.tree_completed.get_children():
             self.tree_completed.delete(item)
-            
+        self.load_cancelled()
+
         self.cursor.execute("ATTACH DATABASE ? AS clients_db", (os.path.join(os.path.dirname(self.db_path), 'clients.db'),))
         
         self.cursor.execute('''
@@ -389,6 +489,96 @@ class ProjectFlowManager:
             self.load_data()
         except sqlite3.Error as e:
             messagebox.showerror("Database Error", str(e))
+
+    def load_cancelled(self):
+        if not hasattr(self, 'tree_cancelled'):
+            return
+        for item in self.tree_cancelled.get_children():
+            self.tree_cancelled.delete(item)
+        try:
+            entries = QC.cancelled_projects(conn=self.conn)
+        except sqlite3.Error as e:
+            print("Could not list cancelled projects:", e)
+            return
+        finally:
+            # cancelled_projects sets a row factory on the shared connection;
+            # every other query here unpacks plain tuples.
+            self.conn.row_factory = None
+            self.cursor = self.conn.cursor()
+        for entry in entries:
+            self.tree_cancelled.insert(
+                "", "end", text=entry['estimate_number'],
+                values=(entry['client_name'], entry['from_stage'],
+                        (entry['cancelled_at'] or "").split()[0] if entry['cancelled_at'] else "",
+                        entry['cancelled_by'], entry['reason']),
+                tags=(entry['id'],))
+
+    def cancel_selected(self):
+        tree, item, status = self.get_selected()
+        if not tree or not item or status is None:
+            messagebox.showwarning("Warning", "Select a project in the flow to cancel.")
+            return
+        p_id = tree.item(item, "tags")[0]
+        try:
+            summary = QC.describe_recorded_work(p_id, conn=self.conn)
+        except QC.CancellationError as e:
+            messagebox.showerror("Cancel Project", str(e))
+            return
+        finally:
+            self.conn.row_factory = None
+            self.cursor = self.conn.cursor()
+
+        dialog = CancelProjectDialog(self.root, summary)
+        self.root.wait_window(dialog)
+        if not dialog.result:
+            return
+        choice, reason = dialog.result
+
+        try:
+            if choice == "estimate":
+                QC.return_to_estimate(p_id, user=self.current_user, reason=reason, conn=self.conn)
+                message = (f"{summary['estimate_number']} is an estimate again.\n\n"
+                           "Open it in the Estimate Manager to edit, then approve it "
+                           "to put it back into the flow.")
+            else:
+                QC.cancel_project(p_id, user=self.current_user, reason=reason, conn=self.conn)
+                message = (f"{summary['estimate_number']} has been cancelled.\n\n"
+                           "It is listed under the Cancelled tab and can be restored "
+                           "from there.")
+        except (QC.CancellationError, sqlite3.Error) as e:
+            messagebox.showerror("Cancel Project", str(e))
+            return
+        finally:
+            self.conn.row_factory = None
+            self.cursor = self.conn.cursor()
+
+        self.load_data()
+        messagebox.showinfo("Cancel Project", message)
+
+    def restore_selected(self, to_status=None):
+        selection = self.tree_cancelled.selection() if hasattr(self, 'tree_cancelled') else ()
+        if not selection:
+            messagebox.showwarning("Warning", "Select a cancelled project to restore.")
+            return
+        item = selection[0]
+        p_id = self.tree_cancelled.item(item, "tags")[0]
+        est_num = self.tree_cancelled.item(item, "text")
+        where = "as an editable estimate" if to_status == QC.STATUS_ESTIMATE else "to the stage it left"
+        if not messagebox.askyesno("Restore Project", f"Restore {est_num} {where}?"):
+            return
+        try:
+            result = QC.restore_project(p_id, user=self.current_user,
+                                        to_status=to_status, conn=self.conn)
+        except (QC.CancellationError, sqlite3.Error) as e:
+            messagebox.showerror("Restore Project", str(e))
+            return
+        finally:
+            self.conn.row_factory = None
+            self.cursor = self.conn.cursor()
+        self.load_data()
+        messagebox.showinfo(
+            "Restore Project",
+            f"{est_num} is back at: {QC.STAGE_NAMES.get(result['status'], result['status'])}.")
 
     def on_hover(self, event):
         tree = event.widget
