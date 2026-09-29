@@ -604,6 +604,112 @@ def all_settled(project_id, responsible_name=None):
 
 # -------------------------------------------------------------------- ledger
 
+STATUS_UNDERWAY = 'underway'
+STATUS_NOT_SENT = 'not_sent'
+STATUS_SENT = 'sent'
+STATUS_RECEIVED = 'received'
+STATUS_PAID = 'paid'
+
+# Ordered from least to most advanced; the label is what the legend shows.
+STATUS_ORDER = [
+    (STATUS_UNDERWAY, "Project Underway", "#2563EB"),
+    (STATUS_NOT_SENT, "NF + Boleto Not Sent", "#DC2626"),
+    (STATUS_SENT, "NF + Boleto Sent", "#EA580C"),
+    (STATUS_RECEIVED, "Payment Received", "#CA8A04"),
+    (STATUS_PAID, "Payee Paid", "#16A34A"),
+]
+STATUS_LABELS = {k: label for k, label, _c in STATUS_ORDER}
+STATUS_COLORS = {k: colour for k, _l, colour in STATUS_ORDER}
+
+
+def obligation_status(flags, settled):
+    """How far along the money is for one payee on one project."""
+    if settled:
+        return STATUS_PAID
+    if flags.get('invoice_paid'):
+        return STATUS_RECEIVED
+    if flags.get('invoice_sent') and flags.get('boleto_sent'):
+        return STATUS_SENT
+    if flags.get('data_sent_to_client'):
+        return STATUS_NOT_SENT
+    return STATUS_UNDERWAY
+
+
+def payee_obligations(payee_id=None, include_paid=True):
+    """One row per (project, payee) that is owed money, newest project first."""
+    init_all()
+    conn = _connect(PROJECT_DB)
+    try:
+        cur = conn.cursor()
+        attached = True
+        try:
+            cur.execute("ATTACH DATABASE ? AS clients_db", (_path('clients.db'),))
+        except sqlite3.OperationalError:
+            attached = False
+        try:
+            projects = cur.execute('''
+                SELECT p.id, p.estimate_number, c.name, p.responsible_user,
+                       COALESCE(p.data_sent_to_client, 0), COALESCE(p.data_approved_by_client, 0),
+                       COALESCE(p.invoice_sent, 0), COALESCE(p.boleto_sent, 0),
+                       COALESCE(p.invoice_paid, 0)
+                FROM projects p
+                LEFT JOIN clients_db.clients c ON p.client_id = c.id
+                WHERE p.status > 0
+                ORDER BY p.id DESC
+            ''').fetchall()
+        finally:
+            if attached:
+                try:
+                    cur.execute("DETACH DATABASE clients_db")
+                except sqlite3.OperationalError:
+                    pass
+    finally:
+        conn.close()
+
+    rows = []
+    for (p_id, est_num, client, responsible, a_sent, b_appr, c_nf, d_bol, e_paid) in projects:
+        flags = {'data_sent_to_client': a_sent, 'data_approved_by_client': b_appr,
+                 'invoice_sent': c_nf, 'boleto_sent': d_bol, 'invoice_paid': e_paid}
+        resolved = resolve_recipients(p_id, responsible)
+        settlements = get_settlements(p_id)
+        for recipient in resolved['recipients']:
+            if payee_id is not None and recipient['payee_id'] != payee_id:
+                continue
+            settled = bool(settlements.get(recipient['payee_id'], {}).get('paid'))
+            if settled and not include_paid:
+                continue
+            rows.append({
+                'project_id': p_id,
+                'estimate_number': est_num,
+                'client': client or "Unknown",
+                'payee_id': recipient['payee_id'],
+                'payee_name': recipient['name'],
+                'amount': recipient['amount'],
+                'settled': settled,
+                'status': obligation_status(flags, settled),
+            })
+    return rows
+
+
+def payee_statement(payee_id):
+    """Everything needed for one payee's report: obligations plus open ledger."""
+    payee = next((p for p in load_payees(active_only=False) if p['id'] == payee_id), None)
+    obligations = payee_obligations(payee_id=payee_id)
+    ledger = load_ledger('payee', payee_id, status='open')
+    owed = sum(o['amount'] for o in obligations if not o['settled'])
+    paid = sum(o['amount'] for o in obligations if o['settled'])
+    adjustment = ledger_balance('payee', payee_id)
+    return {
+        'payee': payee,
+        'obligations': obligations,
+        'ledger': ledger,
+        'total_owed': owed,
+        'total_paid': paid,
+        'adjustment': adjustment,
+        'net_due': owed + adjustment,
+    }
+
+
 def add_ledger_entry(party_type, party_id, kind, amount, description="",
                      project_id=None, current_user="Unknown"):
     """kind: 'credit' (we owe them more) or 'debt' (an advance, deduct later)."""

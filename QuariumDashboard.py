@@ -35,6 +35,7 @@ from QuariumSM import StockManager
 from QuariumProjectFlow import ProjectFlowManager
 from QuariumContractManager import ContractManager # New import
 from QuariumFinanceManager import FinanceManager
+from QuariumDebts import DebtsManager
 
 try:
     from QuariumDriveSync import DriveSyncManager
@@ -961,6 +962,8 @@ class QuariumDashboard:
         app_definitions = [
             ("Projects", "Project Manager", ProjectManager, {'current_user': self.current_user}),
             ("Flow", "Project Flow", ProjectFlowManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
+            ("Finances", "Project Finances", FinanceManager, {'current_user': self.current_user}),
+            ("Debts", "Debts and Credits", DebtsManager, {'current_user': self.current_user}),
             ("Contracts", "Contract Generator", ContractManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
             ("Clients", "Client Manager", ClientManager, {'current_user': self.current_user}),
             ("Services", "Service Manager", ServiceManager, {'current_user': self.current_user}),
