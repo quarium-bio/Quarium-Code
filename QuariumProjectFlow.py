@@ -290,9 +290,17 @@ class ProjectFlowManager:
                     try:
                         with open(os.path.join(_BASE_DIR, 'users.json'), 'r') as f:
                             u_dict = json.load(f)
-                            if self.current_user in u_dict:
-                                def_name = u_dict[self.current_user]
-                    except: pass
+                        record = u_dict.get(self.current_user)
+                        # A record is either {"full_name", "salt", "hash"} or a bare
+                        # legacy name string. Take only the name: the whole dict would
+                        # otherwise be stringified into the executor column, writing
+                        # the password salt and hash into a synced database.
+                        if isinstance(record, dict):
+                            def_name = record.get('full_name') or self.current_user
+                        elif isinstance(record, str):
+                            def_name = record
+                    except Exception:
+                        pass
                     
                     exec_name = simpledialog.askstring("Executor", "Enter the name of the responsible for this service:", parent=dialog, initialvalue=def_name)
                     if exec_name is None: return
