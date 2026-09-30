@@ -16,6 +16,151 @@ from QuariumProjectFlow import ProjectFlowManager
 # workspace so testing cannot disturb live data.
 from QuariumPaths import data_dir
 import QuariumCancellation as QC
+import QuariumPricing as PR
+
+
+def _brl(value):
+    text = f"{abs(value):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    return f"{'-' if value < 0 else ''}R$ {text}"
+
+
+class RepriceDialog(tk.Toplevel):
+    """Offers the three things to do about prices that have moved on.
+
+    Used when an expired estimate is being approved, and when a new version
+    is saved over one whose prices are no longer current. Every option shows
+    what it does to the total on one line, so the choice is made against the
+    number rather than against a description of it.
+    """
+
+    def __init__(self, parent, project_id, title, lead, allow_keep=True):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.project_id = project_id
+        self.result = None
+
+        self.validity = PR.validity(project_id)
+        self.report = PR.margin(project_id)
+        self.previews = {
+            PR.MODE_KEEP: PR.reprice_preview(project_id, PR.MODE_KEEP),
+            PR.MODE_CURRENT: PR.reprice_preview(project_id, PR.MODE_CURRENT),
+        }
+
+        body = ttk.Frame(self, padding=16)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text=title, font=('Helvetica', 13, 'bold')).pack(anchor="w")
+        ttk.Label(body, text=lead, wraplength=520, justify="left",
+                  foreground="#555555").pack(anchor="w", pady=(2, 12))
+
+        if self.report['at_a_loss']:
+            self._loss_panel(body)
+
+        self.choice = tk.StringVar(value=PR.MODE_KEEP if allow_keep else PR.MODE_CURRENT)
+
+        if allow_keep:
+            self._option(body, PR.MODE_KEEP, "Keep the quoted prices",
+                         self._line(self.previews[PR.MODE_KEEP]))
+        self._option(body, PR.MODE_CURRENT, "Reprice at today's rates",
+                     self._line(self.previews[PR.MODE_CURRENT]))
+
+        self._option(body, PR.MODE_INFLATION, "Reprice by inflation", "")
+        inflation = ttk.Frame(body)
+        inflation.pack(anchor="w", padx=(22, 0), pady=(0, 2))
+        ttk.Label(inflation, text="Rate:").pack(side="left")
+        self.rate_var = tk.StringVar(value="0,00")
+        entry = ttk.Entry(inflation, textvariable=self.rate_var, width=8)
+        entry.pack(side="left", padx=4)
+        ttk.Label(inflation, text="%").pack(side="left")
+        ttk.Button(inflation, text="Fetch IPCA", command=self._fetch_ipca,
+                   style="Flat.TButton").pack(side="left", padx=8)
+        self.rate_var.trace_add("write", lambda *a: self._refresh_inflation())
+        self.inflation_line = ttk.Label(body, text="", foreground="#555555")
+        self.inflation_line.pack(anchor="w", padx=(22, 0), pady=(0, 4))
+        self.ipca_note = ttk.Label(body, text="", foreground="#6B7280", wraplength=500,
+                                   justify="left")
+        self.ipca_note.pack(anchor="w", padx=(22, 0), pady=(0, 10))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Confirm", command=self._confirm,
+                   style="Accent.TButton").pack(side="right")
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right", padx=8)
+
+        self._refresh_inflation()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (self.winfo_reqwidth() // 2)
+        y = parent.winfo_rooty() + 60
+        self.geometry(f"{self.winfo_reqwidth()}x{self.winfo_reqheight()}"
+                      f"+{max(x, 0)}+{max(y, 0)}")
+        self.grab_set()
+
+    def _loss_panel(self, parent):
+        r = self.report
+        panel = ttk.LabelFrame(parent, text="This project would run at a loss", padding=10)
+        panel.pack(fill="x", pady=(0, 12))
+        ttk.Label(panel, foreground="#B00020", wraplength=500, justify="left",
+                  text=(f"At today's prices the work costs {_brl(r['spend'])} "
+                        f"and the client pays {_brl(r['revenue'])}"
+                        + (f" after a {r['discount_pct']:.0f}% discount" if r['discount_pct'] else "")
+                        + f", a shortfall of {_brl(-r['margin'])}.")).pack(anchor="w")
+        ttk.Label(panel, foreground="#555555", justify="left",
+                  text=(f"Labour {_brl(r['labor'])}   ·   Reagents {_brl(r['reagents'])}"
+                        f"   ·   Maintenance {_brl(r['maintenance'])}")).pack(anchor="w",
+                                                                              pady=(4, 0))
+
+    def _option(self, parent, mode, label, detail):
+        ttk.Radiobutton(parent, text=label, value=mode, variable=self.choice).pack(anchor="w")
+        if detail:
+            ttk.Label(parent, text=detail, foreground="#555555").pack(
+                anchor="w", padx=(22, 0), pady=(0, 8))
+
+    @staticmethod
+    def _line(preview):
+        if abs(preview['difference']) < 0.005:
+            return f"{_brl(preview['new_total'])}  (no change)"
+        sign = "+" if preview['difference'] > 0 else ""
+        return (f"{_brl(preview['new_total'])}   "
+                f"({sign}{_brl(preview['difference'])}, "
+                f"{sign}{preview['difference_pct']:.1f}%)")
+
+    def _rate(self):
+        try:
+            return float(self.rate_var.get().replace('%', '').replace(',', '.').strip()) / 100.0
+        except ValueError:
+            return None
+
+    def _refresh_inflation(self):
+        rate = self._rate()
+        if rate is None:
+            self.inflation_line.config(text="Enter a rate, for example 4,62")
+            return
+        preview = PR.reprice_preview(self.project_id, PR.MODE_INFLATION, rate)
+        self.previews[PR.MODE_INFLATION] = preview
+        self.inflation_line.config(text=self._line(preview))
+
+    def _fetch_ipca(self):
+        self.ipca_note.config(text="Asking the Banco Central...")
+        self.update_idletasks()
+        rate, note = PR.ipca_accumulated(self.validity['written_on'])
+        if rate is None:
+            self.ipca_note.config(text=note, foreground="#B00020")
+            return
+        self.rate_var.set(f"{rate * 100:.2f}".replace('.', ','))
+        self.ipca_note.config(text=note, foreground="#6B7280")
+        self.choice.set(PR.MODE_INFLATION)
+
+    def _confirm(self):
+        mode = self.choice.get()
+        rate = self._rate() if mode == PR.MODE_INFLATION else 0.0
+        if mode == PR.MODE_INFLATION and rate is None:
+            messagebox.showwarning("Inflation rate",
+                                   "Enter a rate, or fetch the IPCA.", parent=self)
+            return
+        self.result = (mode, rate or 0.0, self.previews.get(mode))
+        self.destroy()
 
 _BASE_DIR = data_dir()
 
@@ -224,10 +369,22 @@ class ProjectManager:
         # Responsible, author and approver are three different people and the
         # dropdown only shows the first. Spelling the other two out stops an
         # approved estimate looking as though the approver had written it.
+        meta = ttk.Frame(left_panel)
+        meta.grid(row=7, column=0, columnspan=3, sticky="w", padx=5, pady=(8, 0))
         self.provenance_var = tk.StringVar()
-        self.provenance_label = ttk.Label(left_panel, textvariable=self.provenance_var,
+        self.provenance_label = ttk.Label(meta, textvariable=self.provenance_var,
                                           foreground="#6B7280")
-        self.provenance_label.grid(row=7, column=0, columnspan=3, sticky="w", padx=5, pady=(8, 0))
+        self.provenance_label.pack(anchor="w")
+
+        # Saving over an existing estimate writes a new version, and the editor
+        # reprices everything as you type. This keeps the loaded version's
+        # prices, so a service can be added to an old quote without the rest of
+        # it silently moving to today's rates.
+        self.price_lock_var = tk.BooleanVar(value=False)
+        self.price_lock_check = ttk.Checkbutton(
+            meta, variable=self.price_lock_var, command=self.update_total_cost,
+            text="Keep the prices from the loaded version (new services priced at today's rates)")
+        self.locked_costs = {}
 
         # Total Samples for Project
         ttk.Label(left_panel, text="Total Samples:").grid(row=4, column=0, sticky="w", pady=2)
@@ -635,8 +792,11 @@ class ProjectManager:
                 except ValueError:
                     pass
 
-            recalculated_cost = self.calculate_service_cost(service_id, num_samples_for_cost)
-            
+            if self.price_lock_var.get() and str(service_id) in self.locked_costs:
+                recalculated_cost = self.locked_costs[str(service_id)]
+            else:
+                recalculated_cost = self.calculate_service_cost(service_id, num_samples_for_cost)
+
             # Update the tree display and tags with the new cost
             values = list(self.project_services_tree.item(item_id, "values"))
             values[2] = f"R$ {recalculated_cost:.2f}"
@@ -985,10 +1145,16 @@ class ProjectManager:
         ''', (project_id,))
         project_services = self.cursor.fetchall()
 
+        self.locked_costs = {}
         for service_id, samples_override, calculated_cost, service_name in project_services:
+            self.locked_costs[str(service_id)] = calculated_cost or 0.0
             self.project_services_tree.insert("", "end", text=service_name,
                                               values=(str(service_id), str(samples_override) if samples_override is not None else "Project Default", f"R$ {calculated_cost:.2f}"),  # type: ignore
                                               tags=(str(service_id), str(samples_override) if samples_override is not None else "", str(calculated_cost)))  # type: ignore
+
+        # Offer the lock only when the stored prices and today's actually
+        # differ; there is nothing to decide when they agree.
+        self._offer_price_lock(project_id)
         self.update_total_cost() # Recalculate to ensure consistency
 
     def _ask_delete_type(self, estimate_number, base_estimate):
@@ -1099,6 +1265,9 @@ class ProjectManager:
         self.estimated_total_cost_var.set("R$ 0.00")
         self.service_samples_override_var.set("")
         self.provenance_var.set("")
+        self.locked_costs = {}
+        self.price_lock_var.set(False)
+        self.price_lock_check.pack_forget()
         self.approve_btn.pack_forget()
 
         for item in self.project_services_tree.get_children():
@@ -1431,15 +1600,92 @@ class ProjectManager:
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not generate PDF: {e}")
 
+    def _offer_price_lock(self, project_id):
+        """Shows the keep-prices control, and says by how much prices moved."""
+        self.price_lock_var.set(False)
+        try:
+            frozen = PR.quote(project_id)
+            today = PR.current_prices(project_id)
+            info = PR.validity(project_id)
+        except (PR.PricingError, sqlite3.Error) as e:
+            print("Could not compare prices for this estimate:", e)
+            self.price_lock_check.pack_forget()
+            return
+
+        drift = today['line_total'] - frozen['line_total']
+        if abs(drift) < 0.01:
+            self.price_lock_check.pack_forget()
+            return
+
+        direction = "risen" if drift > 0 else "fallen"
+        note = (f"Prices have {direction} {_brl(abs(drift))} since this estimate was "
+                f"written on {info['written_on']:%d/%m/%Y}."
+                if info['written_on'] else
+                f"Prices have {direction} {_brl(abs(drift))} since this estimate was written.")
+        self.price_lock_check.config(
+            text=f"Keep the prices from this version — {note} "
+                 f"New services are still priced at today's rates.")
+        self.price_lock_check.pack(anchor="w", pady=(4, 0))
+        self.price_lock_var.set(True)
+
+    def _settle_prices_before_approval(self):
+        """Handles an expired quote and warns about a loss. False means stop."""
+        try:
+            info = PR.validity(self.current_project_id)
+            report = PR.margin(self.current_project_id)
+        except (PR.PricingError, sqlite3.Error) as e:
+            print("Could not check pricing before approval:", e)
+            return True
+
+        if info['expired']:
+            overdue = -(info['days_left'] or 0)
+            dialog = RepriceDialog(
+                self.root, self.current_project_id,
+                "This estimate has expired",
+                f"It was written on {info['written_on']:%d/%m/%Y} and was valid for "
+                f"{info['validity_days']} days, so it ran out {overdue} day(s) ago. "
+                f"Choose the price to approve it at.")
+            self.root.wait_window(dialog)
+            if not dialog.result:
+                return False
+            mode, rate, _preview = dialog.result
+            PR.apply_reprice(self.current_project_id, mode, rate, user=self.current_user)
+            self.load_project(self.estimate_number_var.get())
+            report = PR.margin(self.current_project_id)
+
+        if report['at_a_loss']:
+            shortfall = _brl(-report['margin'])
+            proceed = messagebox.askyesno(
+                "This project would run at a loss",
+                f"At today's prices the work costs {_brl(report['spend'])} "
+                f"and the client pays {_brl(report['revenue'])}"
+                + (f" after a {report['discount_pct']:.0f}% discount"
+                   if report['discount_pct'] else "")
+                + f".\n\nThat is a shortfall of {shortfall}.\n\n"
+                  f"Labour {_brl(report['labor'])}\n"
+                  f"Reagents {_brl(report['reagents'])}\n"
+                  f"Maintenance {_brl(report['maintenance'])}\n\n"
+                  "Approve it anyway?",
+                parent=self.root)
+            if not proceed:
+                return False
+        return True
+
     def approve_estimate(self):
         if not self.current_project_id:
             messagebox.showwarning("Warning", "Please save or load a project first.")
             return
             
+        # Prices may have moved since the quote was written. Settle that before
+        # the estimate becomes a project, because from here on the frozen
+        # figure is what gets invoiced.
+        if not self._settle_prices_before_approval():
+            return
+
         days = simpledialog.askinteger("Approve Estimate", "Enter the number of agreed upon business days for completion:", parent=self.root, minvalue=1)
         if days is None:
             return
-            
+
         try:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             # Record who approved it. Approving is not the same as owning the

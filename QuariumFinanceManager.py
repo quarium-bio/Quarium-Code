@@ -238,7 +238,8 @@ class FinanceManager:
                 SELECT p.id, p.estimate_number, c.name, p.responsible_user,
                        COALESCE(p.data_sent_to_client, 0), COALESCE(p.data_approved_by_client, 0),
                        COALESCE(p.invoice_sent, 0), COALESCE(p.boleto_sent, 0),
-                       COALESCE(p.invoice_paid, 0), p.approved_at, p.created_at
+                       COALESCE(p.invoice_paid, 0), p.approved_at, p.created_at,
+                       COALESCE(p.final_cost, 0)
                 FROM projects p
                 LEFT JOIN clients_db.clients c ON p.client_id = c.id
                 WHERE p.status > 0
@@ -256,9 +257,17 @@ class FinanceManager:
 
         prepared = []
         for (p_id, est_num, client, responsible, a_sent, b_appr, c_nf, d_bol,
-             e_paid, approved_at, created_at) in projects:
+             e_paid, approved_at, created_at, quoted) in projects:
             lines, profit = QP.calculate_cost_lines(p_id)
             project_total = sum(l['amount'] for l in lines) + profit
+
+            # Real money out at today's prices against the frozen price the
+            # client was quoted. raw_amount on purpose: the discount reduces
+            # what is paid in, not what a reagent costs.
+            spend = sum(l['raw_amount'] for l in lines
+                        if l['cost_type'] in (QP.COST_LABOR, QP.COST_MAINTENANCE,
+                                              QP.COST_REAGENTS))
+            at_a_loss = bool(quoted) and spend > quoted
 
             when = self._project_date(approved_at, created_at)
             in_period = ((start is None or (when is not None and when >= start)) and
@@ -277,7 +286,8 @@ class FinanceManager:
             }, settled)
             prepared.append({'id': p_id, 'est': est_num, 'client': client or "Desconhecido",
                              'total': project_total, 'state': state,
-                             'responsible': responsible, 'done': all(state)})
+                             'responsible': responsible, 'done': all(state),
+                             'at_a_loss': at_a_loss, 'spend': spend, 'quoted': quoted})
 
         # Finished business sinks to the bottom: a project with all six stages
         # filled needs nothing, so it should not sit between the ones that do.
@@ -286,7 +296,8 @@ class FinanceManager:
         y = 4
         for row in prepared:
             self._draw_row(y, row['id'], row['est'], row['client'], row['total'],
-                           row['state'], row['responsible'])
+                           row['state'], row['responsible'], row['at_a_loss'],
+                           row['spend'], row['quoted'])
             y += ROW_HEIGHT
 
         self.canvas.configure(scrollregion=(0, 0, COL_BAR + BAR_WIDTH + 90, max(y, 10)))
@@ -297,9 +308,13 @@ class FinanceManager:
         self.totals_tree.insert("", "end", text="TOTAL", values=(format_br_currency(grand),))
 
         settled_count = sum(1 for r in prepared if r['done'])
+        loss_count = sum(1 for r in prepared if r['at_a_loss'])
         caption = f"Totals cover {counted} of {len(prepared)} projects — {period_label}."
         if settled_count:
             caption += f"  {settled_count} fully settled, moved to the bottom of the list."
+        if loss_count:
+            caption += (f"  {loss_count} marked ! cost more to run, at today's prices, "
+                        f"than the client was quoted.")
         self.totals_caption.config(text=caption)
 
     def _fit(self, text, max_px):
@@ -319,13 +334,16 @@ class FinanceManager:
             clipped += ch
         return clipped.rstrip() + "..."
 
-    def _draw_row(self, y, p_id, est_num, client, total, state, responsible):
+    def _draw_row(self, y, p_id, est_num, client, total, state, responsible,
+                  at_a_loss=False, spend=0.0, quoted=0.0):
         c = self.canvas
         band = c.create_rectangle(COL_EST - 8, y, COL_BAR + BAR_WIDTH + 78, y + ROW_HEIGHT - 4,
                                   fill=C_BG, outline="")
         mid = y + (ROW_HEIGHT - 4) / 2
-        c.create_text(COL_EST, mid, text=self._fit(est_num, COL_CLIENT - COL_EST - 12),
-                      anchor="w", font=(UI_FONT, 10), fill=C_TEXT)
+        label = ("!  " + est_num) if at_a_loss else est_num
+        c.create_text(COL_EST, mid, text=self._fit(label, COL_CLIENT - COL_EST - 12),
+                      anchor="w", font=(UI_FONT, 10, "bold" if at_a_loss else "normal"),
+                      fill=C_DANGER if at_a_loss else C_TEXT)
         c.create_text(COL_CLIENT, mid, text=self._fit(client, COL_TOTAL - COL_CLIENT - 12),
                       anchor="w", font=(UI_FONT, 10), fill=C_TEXT)
         c.create_text(COL_TOTAL, mid, text=format_br_currency(total), anchor="w",
@@ -344,7 +362,8 @@ class FinanceManager:
 
         self.rows.append({'y0': y, 'y1': y + ROW_HEIGHT - 4, 'project_id': p_id,
                           'estimate': est_num, 'client': client, 'responsible': responsible,
-                          'segments': segments, 'band': band})
+                          'segments': segments, 'band': band,
+                          'at_a_loss': at_a_loss, 'spend': spend, 'quoted': quoted})
 
     # -------------------------------------------------------------- pointer
 
