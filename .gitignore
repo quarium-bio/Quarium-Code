@@ -6,6 +6,7 @@ stock_backups/
 credentials.json
 token.json
 local_config.json
+service_account.json
 users.json
 settings.json
 temp_lock.json
@@ -13,6 +14,24 @@ QLogo.png
 QuariumDashboard.spec
 build/*
 dist/*
+db_backups/
+
+# Screenshots taken while working on the interface. They are a record of a
+# conversation, not part of the application, and they go stale the moment
+# the screen they show changes.
+attribution_*.png
+debts_*.png
+finance_*.png
+flow_*.png
+settings_*.png
+sidebar_*.png
+splash_*.png
+seg_*.png
+progress_bar_options.png
+reprice_dialog.png
+
+# Editor workspace state
+*.code-workspace
 
 # Python caches
 __pycache__/
