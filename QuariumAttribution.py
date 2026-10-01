@@ -116,8 +116,11 @@ class AttributionEditor(tk.Toplevel):
 
     def reload(self):
         names = self._payee_names()
-        lines, _profit = QP.calculate_cost_lines(self.project_id)
-        self.lines = [l for l in lines if l['cost_type'] == self.cost_type]
+        # The amounts a payee is assigned must be the amounts they will be
+        # paid, so this follows the project's payout basis rather than always
+        # pricing at today's rates.
+        report = QP.payout_report(self.project_id)
+        self.lines = [l for l in report['lines'] if l['cost_type'] == self.cost_type]
         splits = QP.load_splits(self.project_id)
         defaults = QP.load_defaults()
 

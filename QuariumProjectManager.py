@@ -16,6 +16,7 @@ from QuariumProjectFlow import ProjectFlowManager
 # workspace so testing cannot disturb live data.
 from QuariumPaths import data_dir
 import QuariumCancellation as QC
+import QuariumPayees as QP
 import QuariumPricing as PR
 
 
@@ -1697,7 +1698,20 @@ class ProjectManager:
                 WHERE id = ?
             ''', (now, days, self.current_user, self.current_project_id))
             self.conn.commit()
-            
+
+            # Record what the work costs at the agreed price, before anything
+            # can move. project_services.calculated_cost keeps a per-service
+            # total only, so this is the only chance to keep the split between
+            # reagents, labour and maintenance that the client agreed to.
+            try:
+                QP.capture_cost_basis(self.current_project_id, self.current_user)
+            except (sqlite3.Error, OSError) as e:
+                # Not worth failing an approval over, but it must be visible:
+                # without a basis the payout screen can only offer today's
+                # prices for this project.
+                print(f"Could not record the cost basis for this project: {e}")
+
+
             self.approve_btn.pack_forget()
             messagebox.showinfo("Success", f"Project approved and moved to Project Flow tab!\nAgreed completion time: {days} business days.")
             self.load_saved_estimates()

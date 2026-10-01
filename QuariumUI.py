@@ -55,6 +55,11 @@ def apply_modern_style(widget):
                     padding=(14, 6), background=C_PRIMARY, foreground="#FFFFFF")
     style.map("Primary.TButton", background=[("active", "#20506F"),
                                              ("disabled", "#9FB3C2")])
+    # Sits under a cost row to pick which prices that bucket is paid at, so it
+    # has to read as a footnote to the amount above it, not as its own control.
+    style.configure("Basis.TRadiobutton", font=(UI_FONT, 8), background=C_BG,
+                    foreground=C_MUTED)
+    style.map("Basis.TRadiobutton", foreground=[("selected", C_TEXT)])
     style.configure("TCombobox", font=(UI_FONT, 9))
     style.configure("Treeview", font=(UI_FONT, 10), rowheight=26, borderwidth=0,
                     fieldbackground=C_BG, background=C_BG)

@@ -176,6 +176,20 @@ def _payment_notes(conn, project_id):
     return notes
 
 
+def _clear_cost_basis(conn, project_id):
+    """Forgets the agreed cost basis, and any decision taken against it.
+
+    Tolerates the tables being absent: a database that predates the payout
+    basis has nothing to clear.
+    """
+    for table in ('project_cost_basis', 'project_basis_header', 'project_payout_basis'):
+        try:
+            conn.execute(f'DELETE FROM {table} WHERE project_id = ?', (project_id,))
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
+
 def _contract_count(conn, project_id, estimate_number):
     for sql, args in (
             ('SELECT COUNT(*) FROM contract_projects WHERE project_id = ?', (project_id,)),
@@ -218,6 +232,11 @@ def return_to_estimate(project_id, user=None, reason=None, conn=None):
             'cancellation_reason': _stamp(reason, user, f"returned to estimate from "
                                           f"{STAGE_NAMES.get(row['status'], row['status'])}"),
         })
+        # The cost basis is the one exception to leaving the record alone: it
+        # describes a price that has just been withdrawn, and approval only
+        # records a basis when there is none, so leaving it would carry the
+        # old agreed amounts onto whatever the estimate is changed to.
+        _clear_cost_basis(conn, project_id)
         return {'project_id': project_id, 'estimate_number': row['estimate_number'],
                 'from_status': row['status'], 'status': STATUS_ESTIMATE}
     finally:
