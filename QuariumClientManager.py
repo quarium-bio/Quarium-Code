@@ -335,7 +335,7 @@ class ClientManager:
         if not selection:
             messagebox.showwarning("Warning", "Please select an item to edit")
             return
-        item_type, item_id = self.tree.item(selection[0], "tags")
+        item_type, item_id = self._tags_of(selection[0])
         if item_type == "company":
             self.edit_company(item_id)
         elif item_type == "client":
@@ -433,7 +433,7 @@ class ClientManager:
         if not selection:
             messagebox.showwarning("Warning", "Please select an item to delete")
             return
-        item_type, item_id = self.tree.item(selection[0], "tags")
+        item_type, item_id = self._tags_of(selection[0])
         
         if item_type == "company":
             if not item_id or item_id == 'None':
@@ -552,14 +552,9 @@ class ClientManager:
             
             # Auto-highlight and focus the newly saved client
             if self.current_client_id:
-                for comp_node in self.tree.get_children():
-                    for client_node in self.tree.get_children(comp_node):
-                        tags = self.tree.item(client_node, "tags")
-                        if tags and tags[0] == "client" and str(tags[1]) == str(self.current_client_id):
-                            self.tree.selection_set(client_node)
-                            self.tree.see(client_node)
-                            break
-                            
+                self._select_client(self.current_client_id)
+
+
             messagebox.showinfo("Success", "Client saved successfully")
         except sqlite3.Error as e:
             messagebox.showerror("Database Error", f"Could not save client: {e}")
@@ -568,7 +563,7 @@ class ClientManager:
         selection = self.tree.selection()
         if not selection:
             return
-        item_type, item_id = self.tree.item(selection[0], "tags")
+        item_type, item_id = self._tags_of(selection[0])
         if item_type == "client" and item_id:
             self.load_client_to_form(item_id)
         else:
@@ -592,15 +587,30 @@ class ClientManager:
         self.current_client_id = None
 
     # Drag and drop functionality
+    def _tags_of(self, item):
+        """(type, id) for a row, whatever shape its tags are in.
+
+        Unpacking the tuple directly raises on any row that does not carry
+        exactly two tags, and in a Tk callback that failure is invisible.
+        """
+        tags = self.tree.item(item, "tags") or ()
+        return (tags[0] if len(tags) > 0 else None,
+                tags[1] if len(tags) > 1 else "")
+
     def on_drag_start(self, event):
         item = self.tree.identify_row(event.y)
         if item:
-            item_type, item_id = self.tree.item(item, "tags")
+            item_type, item_id = self._tags_of(item)
             if item_type == "client":
                 self.drag_item = item
                 self.drag_item_type = item_type
                 self.drag_item_id = item_id
+                # This binding runs before the Treeview's own, so the selection
+                # here is still the one from before this click.
                 self.original_selection = self.tree.selection()
+                # Nothing has been dragged yet, and on a plain click nothing
+                # will be: see on_drag_end.
+                self.drag_moved = False
 
     def on_drag_motion(self, event):
         if not hasattr(self, 'drag_item') or not self.drag_item:
@@ -612,7 +622,10 @@ class ClientManager:
             self.tree.selection_remove(self.drag_highlight)
         
         if current_item:
-            item_type, _ = self.tree.item(current_item, "tags")
+            # Over a row other than the one grabbed: this is a drag, not a click.
+            if current_item != self.drag_item:
+                self.drag_moved = True
+            item_type, _ = self._tags_of(current_item)
             if item_type == "company":
                 self.tree.item(current_item, open=True)
                 self.tree.selection_add(current_item)
@@ -636,17 +649,23 @@ class ClientManager:
             self.tree.selection_remove(self.drag_highlight)
         
         self.root.config(cursor="") # Reset cursor
-        if hasattr(self, 'original_selection'):
+        # Only undo the highlighting if there was a drag to undo. Restoring
+        # after a plain click put the selection back to whatever was chosen
+        # before it, so a client could be picked while the button was down and
+        # then snapped back on release -- clients other than the first became
+        # unselectable until a company heading was clicked in between.
+        if getattr(self, 'drag_moved', False) and getattr(self, 'original_selection', None):
             try:
-                item_type, _ = self.tree.item(self.original_selection[0], "tags") if self.original_selection else (None, None)
+                item_type, _ = self._tags_of(self.original_selection[0])
                 if item_type == "client":
                     self.tree.selection_set(self.original_selection)
-            except:
-                pass
+            except tk.TclError:
+                pass  # the row went away with a reload; nothing to restore
 
+        moved_id = None
         target_item = self.tree.identify_row(event.y)
         if target_item and target_item != self.drag_item:
-            target_type, target_id = self.tree.item(target_item, "tags")
+            target_type, target_id = self._tags_of(target_item)
             if target_type == "company" and self.drag_item_type == "client":
                 try:
                     if not target_id or target_id == 'None':
@@ -654,17 +673,37 @@ class ClientManager:
                     else:
                         self.cursor.execute("UPDATE clients SET company_id = ? WHERE id = ?", (target_id, self.drag_item_id))
                     self.conn.commit()
+                    moved_id = self.drag_item_id
                     self.load_clients()
                 except sqlite3.Error as e:
                     messagebox.showerror("Database Error", f"Could not move client: {e}")
 
+        # The reload rebuilt every row, so follow the client that was dragged
+        # rather than leaving the form showing someone no longer highlighted.
+        if moved_id is not None:
+            self._select_client(moved_id)
+
         self.drag_item = None
         self.drag_item_type = None
         self.drag_item_id = None
+        self.drag_moved = False
         if hasattr(self, 'drag_highlight'):
             self.drag_highlight = None
         if hasattr(self, 'original_selection'):
             delattr(self, 'original_selection')
+
+    def _select_client(self, client_id):
+        """Highlights a client by its database id, wherever it now sits."""
+        stack = list(self.tree.get_children())
+        while stack:
+            item = stack.pop(0)
+            item_type, item_id = self._tags_of(item)
+            if item_type == "client" and str(item_id) == str(client_id):
+                self.tree.selection_set(item)
+                self.tree.see(item)
+                return True
+            stack.extend(self.tree.get_children(item))
+        return False
 
     def on_closing(self):
         try:
