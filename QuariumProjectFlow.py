@@ -672,6 +672,52 @@ class ProjectFlowManager:
         }
         return breakdown
 
+    def _show_price_drift(self, parent, project_id, breakdown_total):
+        """Says what the client was billed, and how far today's costs have moved.
+
+        The breakdown above is priced at today's rates; projects.final_cost was
+        frozen when the estimate was written. The two differ whenever a reagent
+        price, a service cost or the markup settings have changed since, and
+        the gap is exactly what makes a payout exceed the money received.
+        """
+        self.cursor.execute(
+            "SELECT final_cost, created_at, approved_at FROM projects WHERE id = ?",
+            (project_id,))
+        row = self.cursor.fetchone()
+        if not row or not row[0]:
+            return
+        billed, created_at, approved_at = float(row[0]), row[1], row[2]
+        drift = breakdown_total - billed
+
+        frame = ttk.Frame(parent)
+        frame.pack(fill="x", padx=10, pady=(0, 4))
+        line = ttk.Frame(frame)
+        line.pack(fill="x")
+        ttk.Label(line, text="Invoiced to the client",
+                  font=("Helvetica", 10, "bold")).pack(side="left")
+        ttk.Label(line, text=self.format_br_currency(billed),
+                  font=("Helvetica", 10, "bold")).pack(side="right")
+
+        if abs(drift) < 0.01:
+            ttk.Label(frame, text="Today's costs match the price this was sold at.",
+                      font=("Helvetica", 8), foreground="#6B7280").pack(anchor="w")
+            return
+
+        when = (approved_at or created_at or "").split()[0]
+        try:
+            when = datetime.strptime(when, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+        moved = "risen" if drift > 0 else "fallen"
+        note = (f"The breakdown above is priced at today's rates and has {moved} "
+                f"{self.format_br_currency(abs(drift))} since this was agreed"
+                + (f" on {when}." if when else ".")
+                + " The client pays the frozen price; open Finances to choose which "
+                  "costs to pay out at.")
+        ttk.Label(frame, text=note, font=("Helvetica", 8), wraplength=560,
+                  justify="left", foreground="#B91C1C" if drift > 0 else "#6B7280"
+                  ).pack(anchor="w", pady=(2, 0))
+
     def on_double_click(self, event):
         tree = event.widget
         item = tree.identify_row(event.y)
@@ -730,6 +776,12 @@ class ProjectFlowManager:
         bd_tree.insert("", "end", text="Labor", values=(self.format_br_currency(bd["Labor"]),))
         bd_tree.insert("", "end", text="Maintenance", values=(self.format_br_currency(bd["Maintenance"]),))
         bd_tree.insert("", "end", text="Profit (Margin + Raw)", values=(self.format_br_currency(bd["Profit"]),))
+
+        # These four are recomputed from whatever the stock and service tables
+        # say right now, while the client was invoiced the frozen quote. Say so
+        # on the screen: read without this note, the breakdown looks like it
+        # disagrees with the boleto.
+        self._show_price_drift(tab_overview, p_id, sum(bd.values()))
 
         # --- Tab 2: Finances ---
         tab_finances = ttk.Frame(notebook, padding=20)

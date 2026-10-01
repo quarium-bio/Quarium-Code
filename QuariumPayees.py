@@ -41,6 +41,17 @@ DEFAULT_MAINTENANCE_PAYEE = 'Quarium'
 DEFAULT_REAGENT_PAYEE = 'LNP'
 PROFIT_PAYEE = 'Quarium'
 
+# The three buckets that can be owed to someone, and so the three a payout
+# decision can be taken on. Profit is never chosen: it is the residual, what
+# the money the client paid leaves over once these are settled.
+ATTRIBUTABLE = (COST_REAGENTS, COST_LABOR, COST_MAINTENANCE)
+
+# Which prices a bucket is paid at. The original is the cost basis recorded
+# when the project was approved; the adjusted is what that same work costs on
+# the day the payment is confirmed.
+BASIS_ORIGINAL = 'original'
+BASIS_ADJUSTED = 'adjusted'
+
 # Finance progress segments. C and E reuse the pre-existing invoice columns so
 # the Project Flow dialog and the finance view can never disagree; F is derived
 # from whether every payee on the project has been settled.
@@ -158,7 +169,60 @@ def init_project_tables():
                 UNIQUE (project_id, payee_id)
             )
         ''')
+        # The cost basis as it stood when the project was approved. Written
+        # once, at approval, and never recalculated: approval is when the
+        # client agrees the price, and project_services.calculated_cost keeps
+        # a per-service total only, so without this the split between
+        # reagents, labour and maintenance is lost the moment a price moves.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS project_cost_basis (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                project_service_id INTEGER,
+                service_id INTEGER,
+                service_name TEXT,
+                cost_type TEXT NOT NULL,
+                stock_item_id INTEGER,
+                label TEXT,
+                raw_amount REAL NOT NULL,
+                amount REAL NOT NULL
+            )
+        ''')
+        # The settings those amounts were computed under, kept so a figure can
+        # always be explained years later.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS project_basis_header (
+                project_id INTEGER PRIMARY KEY,
+                revenue REAL NOT NULL,
+                profit_total REAL NOT NULL,
+                profit_margin REAL,
+                taxes_fees REAL,
+                discount REAL,
+                captured_at TEXT,
+                captured_by TEXT
+            )
+        ''')
+        # One decision per bucket, taken when the payment is confirmed.
+        # No row means nobody has chosen yet.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS project_payout_basis (
+                project_id INTEGER NOT NULL,
+                cost_type TEXT NOT NULL,
+                basis TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT,
+                PRIMARY KEY (project_id, cost_type)
+            )
+        ''')
+        # What was actually handed over. Without it the debts ledger recomputes
+        # a past payment from today's prices, so a payee settled in June is
+        # restated every time a reagent moves afterwards.
+        try:
+            cur.execute('ALTER TABLE payee_settlements ADD COLUMN amount REAL')
+        except sqlite3.OperationalError:
+            pass
         cur.execute('CREATE INDEX IF NOT EXISTS idx_splits_project ON project_cost_splits (project_id)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_basis_project ON project_cost_basis (project_id)')
         conn.commit()
     finally:
         conn.close()
@@ -429,6 +493,199 @@ def calculate_cost_lines(project_id):
     return lines, profit_total
 
 
+# ----------------------------------------------------------------- cost basis
+
+def project_revenue(project_id):
+    """What the client was billed: the frozen quote, discount included."""
+    conn = _connect(PROJECT_DB)
+    try:
+        row = conn.execute('SELECT final_cost FROM projects WHERE id = ?',
+                           (project_id,)).fetchone()
+        return float(row[0]) if row and row[0] else 0.0
+    finally:
+        conn.close()
+
+
+def has_cost_basis(project_id):
+    init_project_tables()
+    conn = _connect(PROJECT_DB)
+    try:
+        return conn.execute('SELECT 1 FROM project_basis_header WHERE project_id = ?',
+                            (project_id,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def capture_cost_basis(project_id, current_user="Unknown", force=False):
+    """Records what the work costs, at the moment the project is approved.
+
+    Approval is the only honest moment for this. It is when the client agrees
+    the price, and from then on the amount due never moves, so this is the
+    one record of what each bucket was worth under the agreed figure.
+
+    Returns False if a basis was already recorded: capturing twice would
+    quietly replace the agreed amounts with later ones.
+    """
+    init_project_tables()
+    if has_cost_basis(project_id) and not force:
+        return False
+
+    lines, profit_total = calculate_cost_lines(project_id)
+    settings = _load_settings()
+    conn = _connect(PROJECT_DB)
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            'SELECT discount_percentage, final_cost FROM projects WHERE id = ?',
+            (project_id,)).fetchone()
+        if not row:
+            return False
+        discount, revenue = float(row[0] or 0.0), float(row[1] or 0.0)
+
+        cur.execute('DELETE FROM project_cost_basis WHERE project_id = ?', (project_id,))
+        cur.executemany(
+            'INSERT INTO project_cost_basis (project_id, project_service_id, service_id, '
+            'service_name, cost_type, stock_item_id, label, raw_amount, amount) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [(project_id, l['project_service_id'], l['service_id'], l['service_name'],
+              l['cost_type'], l['stock_item_id'], l['label'], l['raw_amount'], l['amount'])
+             for l in lines])
+        cur.execute(
+            'INSERT INTO project_basis_header (project_id, revenue, profit_total, '
+            'profit_margin, taxes_fees, discount, captured_at, captured_by) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT (project_id) DO UPDATE SET revenue = excluded.revenue, '
+            'profit_total = excluded.profit_total, profit_margin = excluded.profit_margin, '
+            'taxes_fees = excluded.taxes_fees, discount = excluded.discount, '
+            'captured_at = excluded.captured_at, captured_by = excluded.captured_by',
+            (project_id, revenue, profit_total,
+             float(settings.get('profit_margin', 0.0)),
+             float(settings.get('taxes_and_fees', 0.0)), discount,
+             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user))
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def load_cost_basis(project_id):
+    """The recorded basis, its lines shaped as calculate_cost_lines returns
+    them. None when the project was approved before bases were kept."""
+    init_project_tables()
+    conn = _connect(PROJECT_DB)
+    try:
+        keys = ('revenue', 'profit_total', 'profit_margin', 'taxes_fees', 'discount',
+                'captured_at', 'captured_by')
+        header = conn.execute(
+            f'SELECT {", ".join(keys)} FROM project_basis_header WHERE project_id = ?',
+            (project_id,)).fetchone()
+        if not header:
+            return None
+        basis = dict(zip(keys, header))
+        basis['lines'] = [
+            {'project_service_id': r[0], 'service_id': r[1], 'service_name': r[2],
+             'cost_type': r[3], 'stock_item_id': r[4], 'label': r[5],
+             'raw_amount': r[6], 'amount': r[7]}
+            for r in conn.execute(
+                'SELECT project_service_id, service_id, service_name, cost_type, '
+                'stock_item_id, label, raw_amount, amount FROM project_cost_basis '
+                'WHERE project_id = ? ORDER BY id', (project_id,))]
+        return basis
+    finally:
+        conn.close()
+
+
+def get_payout_basis(project_id):
+    """{cost_type: 'original' | 'adjusted'}, for the buckets already decided."""
+    init_project_tables()
+    conn = _connect(PROJECT_DB)
+    try:
+        return {r[0]: r[1] for r in conn.execute(
+            'SELECT cost_type, basis FROM project_payout_basis WHERE project_id = ?',
+            (project_id,))}
+    finally:
+        conn.close()
+
+
+def set_payout_basis(project_id, cost_type, basis, current_user="Unknown"):
+    """Records which prices one bucket is paid at."""
+    if basis not in (BASIS_ORIGINAL, BASIS_ADJUSTED):
+        raise ValueError(f"Unknown payout basis {basis!r}.")
+    init_project_tables()
+    conn = _connect(PROJECT_DB)
+    try:
+        conn.execute(
+            'INSERT INTO project_payout_basis (project_id, cost_type, basis, decided_at, '
+            'decided_by) VALUES (?, ?, ?, ?, ?) '
+            'ON CONFLICT (project_id, cost_type) DO UPDATE SET basis = excluded.basis, '
+            'decided_at = excluded.decided_at, decided_by = excluded.decided_by',
+            (project_id, cost_type, basis,
+             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def payout_report(project_id):
+    """What each bucket is worth on both bases, and what that leaves over.
+
+    The money available to pay anyone is the money the client was billed, and
+    that figure was frozen when the quote was written. So profit is not a
+    bucket to be chosen but the residual: pay every bucket at the agreed
+    price and the quoted profit survives intact; pay one at today's price
+    instead and the difference comes out of profit.
+    """
+    init_project_tables()
+    current_lines, current_profit = calculate_cost_lines(project_id)
+    basis = load_cost_basis(project_id)
+    chosen = get_payout_basis(project_id)
+    revenue = project_revenue(project_id)
+
+    def total_of(lines, cost_type):
+        return sum(l['amount'] for l in lines if l['cost_type'] == cost_type)
+
+    buckets = {}
+    effective = []
+    for cost_type in ATTRIBUTABLE:
+        current_total = total_of(current_lines, cost_type)
+        original_total = total_of(basis['lines'], cost_type) if basis else None
+        # Default to the agreed price, so a payout nobody has looked at still
+        # reconciles with the money that came in. Without a recorded basis
+        # there is nothing to pay at but today's prices.
+        pick = chosen.get(cost_type, BASIS_ORIGINAL)
+        if basis is None:
+            pick = BASIS_ADJUSTED
+        source = basis['lines'] if pick == BASIS_ORIGINAL else current_lines
+        effective += [l for l in source if l['cost_type'] == cost_type]
+        buckets[cost_type] = {
+            'original': original_total,
+            'current': current_total,
+            'basis': pick,
+            'amount': current_total if pick == BASIS_ADJUSTED else original_total,
+            'moved': (original_total is not None
+                      and abs(current_total - original_total) >= 0.005),
+            'decided': cost_type in chosen,
+        }
+
+    spend = sum(b['amount'] for b in buckets.values())
+    # An unsaved or zero-value project has no revenue to divide; fall back to
+    # the computed profit rather than reporting the whole spend as a loss.
+    profit = (revenue - spend) if revenue > 0 else current_profit
+    return {
+        'project_id': project_id,
+        'revenue': revenue,
+        'recorded': basis is not None,
+        'captured_at': basis['captured_at'] if basis else None,
+        'buckets': buckets,
+        'lines': effective,
+        'spend': spend,
+        'profit': profit,
+        'original_profit': basis['profit_total'] if basis else current_profit,
+        'at_a_loss': profit < -0.005,
+        'moved': any(b['moved'] for b in buckets.values()),
+    }
+
+
 # --------------------------------------------------------------------- splits
 
 def load_splits(project_id):
@@ -494,9 +751,14 @@ def resolve_recipients(project_id, responsible_name=None):
     Falls back through explicit split -> remembered default -> category
     default (Labor to the project's responsible, Maintenance to Quarium,
     Reagents to LNP). Profit always goes to Quarium.
+
+    The amounts are whatever the project's payout basis says each bucket is
+    paid at, so switching a bucket to today's prices moves money out of
+    Quarium's profit and into that bucket's payees, not into thin air.
     """
     init_all()
-    lines, profit_total = calculate_cost_lines(project_id)
+    report = payout_report(project_id)
+    lines, profit_total = report['lines'], report['profit']
     splits = load_splits(project_id)
     defaults = load_defaults()
 
@@ -570,25 +832,34 @@ def get_settlements(project_id):
     init_project_tables()
     conn = _connect(PROJECT_DB)
     try:
-        return {r[0]: {'paid': bool(r[1]), 'paid_at': r[2], 'paid_by': r[3]} for r in conn.execute(
-            'SELECT payee_id, paid, paid_at, paid_by FROM payee_settlements WHERE project_id = ?',
-            (project_id,)).fetchall()}
+        return {r[0]: {'paid': bool(r[1]), 'paid_at': r[2], 'paid_by': r[3], 'amount': r[4]}
+                for r in conn.execute(
+            'SELECT payee_id, paid, paid_at, paid_by, amount FROM payee_settlements '
+            'WHERE project_id = ?', (project_id,)).fetchall()}
     finally:
         conn.close()
 
 
-def set_settled(project_id, payee_id, paid, current_user="Unknown"):
+def set_settled(project_id, payee_id, paid, current_user="Unknown", amount=None):
+    """Marks a payee paid, recording what was handed over.
+
+    The amount is stored rather than recomputed later: a payment that has
+    already happened must not be restated because a reagent price moved
+    afterwards. Unmarking clears it, since nothing was paid after all.
+    """
     init_project_tables()
     conn = _connect(PROJECT_DB)
     try:
         conn.execute('''
-            INSERT INTO payee_settlements (project_id, payee_id, paid, paid_at, paid_by)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO payee_settlements (project_id, payee_id, paid, paid_at, paid_by, amount)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (project_id, payee_id)
-            DO UPDATE SET paid = excluded.paid, paid_at = excluded.paid_at, paid_by = excluded.paid_by
+            DO UPDATE SET paid = excluded.paid, paid_at = excluded.paid_at,
+                          paid_by = excluded.paid_by, amount = excluded.amount
         ''', (project_id, payee_id, 1 if paid else 0,
               datetime.now().strftime('%Y-%m-%d %H:%M:%S') if paid else None,
-              current_user if paid else None))
+              current_user if paid else None,
+              amount if paid else None))
         conn.commit()
     finally:
         conn.close()
@@ -678,16 +949,21 @@ def payee_obligations(payee_id=None, include_paid=True):
         for recipient in resolved['recipients']:
             if payee_id is not None and recipient['payee_id'] != payee_id:
                 continue
-            settled = bool(settlements.get(recipient['payee_id'], {}).get('paid'))
+            settlement = settlements.get(recipient['payee_id'], {})
+            settled = bool(settlement.get('paid'))
             if settled and not include_paid:
                 continue
+            # Once paid, report what was handed over. Recomputing it would
+            # restate a closed payment at whatever prices apply today.
+            amount = (settlement['amount'] if settled and settlement.get('amount') is not None
+                      else recipient['amount'])
             rows.append({
                 'project_id': p_id,
                 'estimate_number': est_num,
                 'client': client or "Unknown",
                 'payee_id': recipient['payee_id'],
                 'payee_name': recipient['name'],
-                'amount': recipient['amount'],
+                'amount': amount,
                 'settled': settled,
                 'status': obligation_status(flags, settled),
             })

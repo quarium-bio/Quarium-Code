@@ -259,7 +259,10 @@ class FinanceManager:
         for (p_id, est_num, client, responsible, a_sent, b_appr, c_nf, d_bol,
              e_paid, approved_at, created_at, quoted) in projects:
             lines, profit = QP.calculate_cost_lines(p_id)
-            project_total = sum(l['amount'] for l in lines) + profit
+            # The column and the period's grand total are money in, so they
+            # follow the frozen price the client was billed. Recomputing them
+            # from today's costs made the totals drift away from the boletos.
+            project_total = quoted or (sum(l['amount'] for l in lines) + profit)
 
             # Real money out at today's prices against the frozen price the
             # client was quoted. raw_amount on purpose: the discount reduces
@@ -449,9 +452,10 @@ class ProjectFinanceDialog(tk.Toplevel):
         self.current_user = current_user
         self.segment_boxes = {}
         self.bubbles = {}
+        self.report = None
 
         self.title(f"{estimate_number}  -  Finance Breakdown")
-        self.geometry("1000x580")
+        self.geometry("1000x640")
         self.configure(background=C_BG)
         self.transient(parent)
         self.grab_set()
@@ -518,23 +522,46 @@ class ProjectFinanceDialog(tk.Toplevel):
         middle = ttk.Frame(columns)
         middle.pack(side="left", fill="y", padx=(0, 26))
         ttk.Label(middle, text="COSTS", font=(UI_FONT, 8, "bold"), foreground=C_FAINT).pack(anchor="w")
-        ttk.Label(middle, text="by category  ·  Edit to set payees",
-                  style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        self.costs_note = ttk.Label(middle, text="by category  ·  Edit to set payees",
+                                    style="Muted.TLabel", wraplength=300, justify="left")
+        self.costs_note.pack(anchor="w", pady=(0, 10))
         self.category_labels = {}
-        for key, label in ((QP.COST_LABOR, "Labor"), (QP.COST_MAINTENANCE, "Maintenance"),
-                           (QP.COST_PROFIT, "Profit"), (QP.COST_REAGENTS, "Reagents")):
-            row = ttk.Frame(middle)
-            row.pack(fill="x", pady=5)
+        self.basis_vars = {}
+        self.basis_rows = {}
+        # Profit comes last because it is now what the other three leave over,
+        # so it has to sit directly above the total to read that way.
+        for key, label in ((QP.COST_REAGENTS, "Reagents"), (QP.COST_LABOR, "Labor"),
+                           (QP.COST_MAINTENANCE, "Maintenance"), (QP.COST_PROFIT, "Profit")):
+            # The price choice belongs under its own amount, so each category
+            # gets a holder and the choice is packed inside that, not into the
+            # column, where it would drift to the bottom.
+            holder = ttk.Frame(middle)
+            holder.pack(fill="x", pady=(5, 0))
+            row = ttk.Frame(holder)
+            row.pack(fill="x")
             ttk.Label(row, text=label, width=13, font=(UI_FONT, 10)).pack(side="left")
             amount = ttk.Label(row, text="-", width=14, anchor="e", font=(UI_FONT, 10))
             amount.pack(side="left")
             if key == QP.COST_PROFIT:
-                # Profit is always Quarium's, so there is nothing to attribute.
+                # Profit is always Quarium's, so there is nothing to attribute
+                # and nothing to choose: it is whatever the other three leave.
                 ttk.Label(row, text="", width=7).pack(side="left", padx=(8, 0))
             else:
                 ttk.Button(row, text="Edit", style="Tiny.TButton", width=6,
                            command=lambda k=key: self._edit_attribution(k)).pack(side="left",
                                                                                  padx=(8, 0))
+                choice = ttk.Frame(holder)
+                variable = tk.StringVar(value=QP.BASIS_ORIGINAL)
+                buttons = []
+                for basis in (QP.BASIS_ORIGINAL, QP.BASIS_ADJUSTED):
+                    button = ttk.Radiobutton(
+                        choice, text="", value=basis, variable=variable,
+                        style="Basis.TRadiobutton",
+                        command=lambda k=key, b=basis: self._choose_basis(k, b))
+                    button.pack(side="left", padx=(0, 10))
+                    buttons.append(button)
+                self.basis_vars[key] = variable
+                self.basis_rows[key] = (choice, buttons)
             self.category_labels[key] = amount
         ttk.Separator(middle, orient="horizontal").pack(fill="x", pady=8)
         total_row = ttk.Frame(middle)
@@ -543,6 +570,9 @@ class ProjectFinanceDialog(tk.Toplevel):
         self.total_lbl = ttk.Label(total_row, text="-", width=15, anchor="e",
                                    font=(UI_FONT, 10, "bold"))
         self.total_lbl.pack(side="left")
+        self.revenue_lbl = ttk.Label(middle, text="", style="Muted.TLabel",
+                                     wraplength=300, justify="left")
+        self.revenue_lbl.pack(anchor="w", pady=(4, 0))
 
         right = ttk.Frame(columns)
         right.pack(side="right", fill="both", expand=True)
@@ -582,19 +612,81 @@ class ProjectFinanceDialog(tk.Toplevel):
             self, self.project_id, cost_type, self.responsible,
             self.current_user, on_change=self._refresh)
 
-    def _toggle_bubble(self, payee_id, currently_paid):
-        QP.set_settled(self.project_id, payee_id, not currently_paid, self.current_user)
+    def _choose_basis(self, cost_type, basis):
+        """Picks which prices one bucket is paid at."""
+        settled = [s for s in QP.get_settlements(self.project_id).values() if s.get('paid')]
+        if settled and not messagebox.askyesno(
+                "Payments already recorded",
+                f"{len(settled)} payee(s) on this project have already been paid, and "
+                "those amounts stay as they were recorded.\n\nChanging the basis now "
+                "only affects whoever has not been paid yet. Change it?", parent=self):
+            self.basis_vars[cost_type].set(self.report['buckets'][cost_type]['basis'])
+            return
+        QP.set_payout_basis(self.project_id, cost_type, basis, self.current_user)
         self._refresh()
 
+    def _toggle_bubble(self, payee_id, currently_paid, name, amount):
+        if currently_paid:
+            QP.set_settled(self.project_id, payee_id, False, self.current_user)
+            self._refresh()
+            return
+        # The figure is written down at this point rather than recomputed
+        # later, so confirm the number that is about to be committed.
+        if not messagebox.askyesno(
+                "Confirm payment",
+                f"Record {format_br_currency(amount)} as paid to {name}?\n\n"
+                "The amount is stored as it stands now, so later changes to "
+                "reagent prices or service costs will not restate it.",
+                parent=self):
+            return
+        QP.set_settled(self.project_id, payee_id, True, self.current_user, amount)
+        self._refresh()
+
+    def _refresh_basis(self, report):
+        """Offers the price choice only on buckets whose price has moved."""
+        header = "by category  ·  Edit to set payees"
+        if not report['recorded']:
+            self.costs_note.config(
+                text=f"{header}\nNo agreed basis was recorded for this project, so these "
+                     "are today's prices.")
+        elif report['moved']:
+            self.costs_note.config(
+                text=f"{header}\nSome costs have moved since approval. Choose the price "
+                     "to pay each at — the difference comes out of profit.")
+        else:
+            self.costs_note.config(text=f"{header}\nCosts are unchanged since approval.")
+
+        for key, (frame, buttons) in self.basis_rows.items():
+            bucket = report['buckets'][key]
+            if not bucket['moved']:
+                frame.pack_forget()
+                continue
+            self.basis_vars[key].set(bucket['basis'])
+            buttons[0].config(text=f"agreed  {format_br_currency(bucket['original'])}")
+            buttons[1].config(text=f"today  {format_br_currency(bucket['current'])}")
+            frame.pack(fill="x", padx=(14, 0), pady=(1, 0))
+
     def _refresh(self):
-        lines, profit = QP.calculate_cost_lines(self.project_id)
-        by_category = {QP.COST_LABOR: 0.0, QP.COST_MAINTENANCE: 0.0,
-                       QP.COST_REAGENTS: 0.0, QP.COST_PROFIT: profit}
-        for line in lines:
-            by_category[line['cost_type']] = by_category.get(line['cost_type'], 0.0) + line['amount']
+        report = QP.payout_report(self.project_id)
+        self.report = report
         for key, widget in self.category_labels.items():
-            widget.config(text=format_br_currency(by_category.get(key, 0.0)))
-        self.total_lbl.config(text=format_br_currency(sum(by_category.values())))
+            if key == QP.COST_PROFIT:
+                widget.config(text=format_br_currency(report['profit']),
+                              foreground=C_DANGER if report['at_a_loss'] else C_TEXT)
+            else:
+                widget.config(text=format_br_currency(report['buckets'][key]['amount']))
+        self.total_lbl.config(text=format_br_currency(report['spend'] + report['profit']))
+        self._refresh_basis(report)
+
+        if report['at_a_loss']:
+            self.revenue_lbl.config(
+                text=f"The client paid {format_br_currency(report['revenue'])}, which is "
+                     f"{format_br_currency(-report['profit'])} less than these costs.",
+                style="Danger.TLabel")
+        else:
+            self.revenue_lbl.config(
+                text=f"received from the client: {format_br_currency(report['revenue'])}",
+                style="Muted.TLabel")
 
         resolved = QP.resolve_recipients(self.project_id, self.responsible)
         settlements = QP.get_settlements(self.project_id)
@@ -613,6 +705,10 @@ class ProjectFinanceDialog(tk.Toplevel):
         self.bubbles = {}
         for recipient in resolved['recipients']:
             paid = recipient['payee_id'] in paid_ids
+            # A settled payee shows what was handed over, not what the same
+            # work would come to today.
+            recorded = settlements.get(recipient['payee_id'], {}).get('amount')
+            amount = recorded if paid and recorded is not None else recipient['amount']
             row = ttk.Frame(self.recipients.inner)
             row.pack(fill="x", pady=3, padx=(0, 6))
             bubble = tk.Canvas(row, width=18, height=18, highlightthickness=0, background=C_BG)
@@ -620,11 +716,12 @@ class ProjectFinanceDialog(tk.Toplevel):
             oval = bubble.create_oval(3, 3, 16, 16, fill=C_DONE if paid else C_BG,
                                       outline=C_DONE if paid else "#C2C7CE", width=2)
             bubble.bind("<Double-1>",
-                        lambda e, pid=recipient['payee_id'], p=paid: self._toggle_bubble(pid, p))
+                        lambda e, pid=recipient['payee_id'], p=paid,
+                        n=recipient['name'], a=amount: self._toggle_bubble(pid, p, n, a))
             name = ttk.Label(row, text=recipient['name'], font=(UI_FONT, 10),
                              foreground=C_MUTED if paid else C_TEXT)
             name.pack(side="left", padx=10)
-            ttk.Label(row, text=format_br_currency(recipient['amount']),
+            ttk.Label(row, text=format_br_currency(amount),
                       font=(UI_FONT, 10), foreground=C_MUTED if paid else C_TEXT).pack(side="right")
             self.bubbles[recipient['payee_id']] = (bubble, oval)
 
