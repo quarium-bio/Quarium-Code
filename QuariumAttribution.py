@@ -200,15 +200,14 @@ class AttributionEditor(tk.Toplevel):
         self.reload()
 
     def _add_payee(self, var, combo):
-        name = simpledialog.askstring("New Payee", "Name of the person or company:", parent=self)
-        if not name or not name.strip():
+        dialog = NewPayeeDialog(self)
+        self.wait_window(dialog)
+        if not dialog.result:
             var.set("")
             return
-        kind = "company" if messagebox.askyesno(
-            "Type", f"Is '{name.strip()}' a company?\n\nYes = company, No = person",
-            parent=self) else "person"
+        name, kind = dialog.result
         try:
-            QP.add_payee(name.strip(), kind, self.current_user)
+            QP.add_payee(name, kind, self.current_user)
         except Exception as e:
             messagebox.showerror("Error", f"Could not add payee: {e}", parent=self)
             return
@@ -252,6 +251,72 @@ class AttributionEditor(tk.Toplevel):
         QP.set_split(self.project_id, line['project_service_id'], line['cost_type'],
                      line['stock_item_id'], dialog.result, self.current_user)
         self.reload()
+
+
+class NewPayeeDialog(tk.Toplevel):
+    """Asks for a payee's name and what kind of payee it is, in one step.
+
+    The type used to be a second popup asking whether the name was a company,
+    answered Yes or No. PF and PJ are the terms the business actually uses --
+    the contract templates are already named for them -- so the type is the
+    choice that closes the dialog, and there is only one dialog.
+    """
+
+    # The labels are the business's own; the kind is what payees.db stores.
+    KINDS = [
+        ("PF", "person", "Pessoa Física — an individual"),
+        ("PJ", "company", "Pessoa Jurídica — a company"),
+    ]
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.result = None
+
+        self.title("New Payee")
+        self.configure(background=C_BG)
+        self.resizable(False, False)
+        self.transient(parent)
+        apply_modern_style(self)
+
+        outer = ttk.Frame(self, padding=(22, 18))
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text="Name of the person or company:",
+                  font=(UI_FONT, 10)).pack(anchor="w")
+        self.name_var = tk.StringVar()
+        entry = ttk.Entry(outer, textvariable=self.name_var, width=38, font=(UI_FONT, 10))
+        entry.pack(fill="x", pady=(6, 12))
+
+        for label, _kind, description in self.KINDS:
+            ttk.Label(outer, text=f"{label}  ·  {description}",
+                      style="Muted.TLabel").pack(anchor="w")
+
+        self.warning = ttk.Label(outer, text="", style="Danger.TLabel")
+        self.warning.pack(anchor="w", pady=(8, 0))
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="right")
+        for label, kind, _description in reversed(self.KINDS):
+            ttk.Button(buttons, text=label, width=8, style="Primary.TButton",
+                       command=lambda k=kind: self._choose(k)).pack(side="right", padx=(0, 6))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        entry.focus_set()
+        self.grab_set()
+
+    def _choose(self, kind):
+        name = self.name_var.get().strip()
+        if not name:
+            # Closing on an empty name would look like it had worked.
+            self.warning.config(text="Enter a name first.")
+            return
+        self.result = (name, kind)
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
 
 
 class SplitDialog(tk.Toplevel):

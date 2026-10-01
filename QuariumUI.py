@@ -120,6 +120,51 @@ def format_br_date(value):
     return value.strftime("%d/%m/%Y") if value else ""
 
 
+def digits_only(value):
+    return ''.join(ch for ch in str(value or '') if ch.isdigit())
+
+
+def is_valid_cpf(cpf):
+    """Validates a Brazilian CPF, check digits and all."""
+    cpf = digits_only(cpf)
+    if len(cpf) != 11 or len(set(cpf)) == 1:
+        return False
+    for length, weight in ((9, 10), (10, 11)):
+        total = sum(int(cpf[i]) * (weight - i) for i in range(length))
+        digit = (total * 10) % 11
+        if digit == 10:
+            digit = 0
+        if digit != int(cpf[length]):
+            return False
+    return True
+
+
+def is_valid_cnpj(cnpj):
+    """Validates a Brazilian CNPJ, check digits and all."""
+    cnpj = digits_only(cnpj)
+    if len(cnpj) != 14 or len(set(cnpj)) == 1:
+        return False
+    for weights, position in (([5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2], 12),
+                              ([6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2], 13)):
+        total = sum(int(cnpj[i]) * weights[i] for i in range(position))
+        digit = 11 - (total % 11)
+        if digit >= 10:
+            digit = 0
+        if digit != int(cnpj[position]):
+            return False
+    return True
+
+
+def format_cpf_cnpj(value):
+    """Punctuates a document number, leaving anything unexpected alone."""
+    digits = digits_only(value)
+    if len(digits) == 11:
+        return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+    if len(digits) == 14:
+        return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
+    return str(value or '')
+
+
 def rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
     """Canvas has no rounded rectangle, so trace one as a plain polygon.
 

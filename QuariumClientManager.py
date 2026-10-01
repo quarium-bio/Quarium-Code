@@ -11,6 +11,7 @@ from datetime import datetime
 # engines replicating the same open databases. Source runs get a separate
 # workspace so testing cannot disturb live data.
 from QuariumPaths import data_dir
+from QuariumUI import is_valid_cnpj, is_valid_cpf
 
 _BASE_DIR = data_dir()
 
@@ -672,49 +673,13 @@ class ClientManager:
         except Exception:
             pass
             
+    # The check-digit maths is shared with the payee manager; keeping a second
+    # copy here is how the two drift apart.
     def _is_valid_cpf(self, cpf: str) -> bool:
-        """Validates a Brazilian CPF number."""
-        cpf = ''.join(re.findall(r'\d', cpf))
-
-        if not cpf or len(cpf) != 11 or len(set(cpf)) == 1:
-            return False
-
-        # Calculate first check digit
-        s = sum(int(cpf[i]) * (10 - i) for i in range(9))
-        d1 = (s * 10) % 11
-        if d1 == 10: d1 = 0
-        if d1 != int(cpf[9]):
-            return False
-
-        # Calculate second check digit
-        s = sum(int(cpf[i]) * (11 - i) for i in range(10))
-        d2 = (s * 10) % 11
-        if d2 == 10: d2 = 0
-        if d2 != int(cpf[10]):
-            return False
-
-        return True
+        return is_valid_cpf(cpf)
 
     def _is_valid_cnpj(self, cnpj: str) -> bool:
-        """Validates a Brazilian CNPJ number."""
-        cnpj = ''.join(re.findall(r'\d', cnpj))
-
-        if not cnpj or len(cnpj) != 14 or len(set(cnpj)) == 1:
-            return False
-
-        # Calculate first check digit
-        weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
-        s = sum(int(cnpj[i]) * weights1[i] for i in range(12))
-        d1 = 11 - (s % 11)
-        if d1 >= 10: d1 = 0
-        if d1 != int(cnpj[12]): return False
-
-        # Calculate second check digit
-        weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
-        s = sum(int(cnpj[i]) * weights2[i] for i in range(13))
-        d2 = 11 - (s % 11)
-        if d2 >= 10: d2 = 0
-        return d2 == int(cnpj[13])
+        return is_valid_cnpj(cnpj)
 
 if __name__ == "__main__":
     root = tk.Tk()

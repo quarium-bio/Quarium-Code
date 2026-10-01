@@ -64,6 +64,7 @@ from QuariumProjectFlow import ProjectFlowManager
 from QuariumContractManager import ContractManager # New import
 from QuariumFinanceManager import FinanceManager
 from QuariumDebts import DebtsManager
+from QuariumPayeeManager import PayeeManager
 
 try:
     from QuariumDriveSync import DriveSyncManager
@@ -189,10 +190,55 @@ class QuariumDashboard:
         salt = base64.urlsafe_b64decode(salt_b64.encode('utf-8'))
         return self._hash_password(provided_password, salt) == stored_hash
 
+    def _claim_taskbar_button(self, window):
+        """Gives a frameless window its own taskbar button and alt-tab entry.
+
+        A window with no title bar is a plain popup as far as Windows is
+        concerned, so it gets neither. That matters during startup: the main
+        window is withdrawn until the user has logged in, so the splash is the
+        only thing on screen, and without this it cannot be brought back once
+        another window covers it. Startup can take a while when the sync has
+        work to do, which is exactly when someone switches away.
+
+        Best effort. A window that keeps working but sits behind something is
+        better than no window at all, so failure here is reported and ignored.
+        """
+        if sys.platform != 'win32':
+            return
+        try:
+            import ctypes
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+
+            window.update_idletasks()
+            hwnd = int(window.wm_frame(), 16)
+            user32 = ctypes.windll.user32
+            # The Ptr forms exist only on 64-bit; the plain ones truncate a
+            # style word there, so pick the right pair rather than assume.
+            get_style = getattr(user32, 'GetWindowLongPtrW', None) or user32.GetWindowLongW
+            set_style = getattr(user32, 'SetWindowLongPtrW', None) or user32.SetWindowLongW
+            get_style.restype = ctypes.c_ssize_t
+            get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            set_style.restype = ctypes.c_ssize_t
+            set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+
+            style = get_style(hwnd, GWL_EXSTYLE)
+            set_style(hwnd, GWL_EXSTYLE, (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+            # The taskbar only reads the style when the window is shown, so it
+            # has to be taken down and put back for the change to register.
+            window.withdraw()
+            window.deiconify()
+        except Exception as e:
+            print("Could not give the splash its own taskbar button:", e)
+
     def create_splash_screen(self):
         self.splash = tk.Toplevel(self.root)
         self.splash.overrideredirect(True) # No title bar
-        
+        # Not drawn while there is no title bar, but it is what the taskbar
+        # button and the alt-tab entry are labelled with.
+        self.splash.title("Quarium Dashboard")
+
         width, height = 450, 300
         screen_width = self.splash.winfo_screenwidth()
         screen_height = self.splash.winfo_screenheight()
@@ -240,6 +286,10 @@ class QuariumDashboard:
         
         self.splash_progress = ttk.Progressbar(splash_frame, orient="horizontal", length=300, mode='determinate')
         self.splash_progress.pack(pady=10)
+
+        # Once the contents exist, so the window is its final size when the
+        # taskbar picks it up.
+        self._claim_taskbar_button(self.splash)
 
     def update_splash(self, text, value):
         # Ensure UI updates are done on the main thread
@@ -1232,6 +1282,7 @@ class QuariumDashboard:
             ("Flow", "Project Flow", ProjectFlowManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
             ("Finances", "Project Finances", FinanceManager, {'current_user': self.current_user}),
             ("Debts", "Debts and Credits", DebtsManager, {'current_user': self.current_user}),
+            ("Payees", "Payee Manager", PayeeManager, {'current_user': self.current_user}),
             ("Contracts", "Contract Generator", ContractManager, {'current_user': self.current_user, 'drive_sync': self.drive_sync}),
             ("Clients", "Client Manager", ClientManager, {'current_user': self.current_user}),
             ("Services", "Service Manager", ServiceManager, {'current_user': self.current_user}),
@@ -1347,6 +1398,10 @@ class QuariumDashboard:
             app.load_approved_projects()
         elif view_id == "Stock":
             app.refresh_tree()
+        elif view_id == "Payees":
+            # A payee can be created from the attribution editor on another
+            # tab, so this list is stale as soon as that happens.
+            app.load_payees()
         elif view_id == "Composites":
             app.load_items()
             app.update_summary()

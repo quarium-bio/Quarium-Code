@@ -52,6 +52,13 @@ ATTRIBUTABLE = (COST_REAGENTS, COST_LABOR, COST_MAINTENANCE)
 BASIS_ORIGINAL = 'original'
 BASIS_ADJUSTED = 'adjusted'
 
+# What is needed to actually pay someone, beyond knowing their name. Kept as
+# one list so the schema, the loader and the editor cannot disagree.
+PAYEE_DETAIL_COLUMNS = ['cpf_cnpj', 'email', 'phone', 'pix_key', 'bank_details',
+                        'address', 'updated_at', 'updated_by']
+PAYEE_EDITABLE = ['name', 'kind', 'cpf_cnpj', 'email', 'phone', 'pix_key',
+                  'bank_details', 'address', 'notes']
+
 # Finance progress segments. C and E reuse the pre-existing invoice columns so
 # the Project Flow dialog and the finance view can never disagree; F is derived
 # from whether every payee on the project has been settled.
@@ -96,6 +103,13 @@ def init_payee_db():
                 created_by TEXT
             )
         ''')
+        # Added after the fact: a payee started as a name to attribute a cost
+        # to, and became someone money is actually sent to.
+        for column in PAYEE_DETAIL_COLUMNS:
+            try:
+                cur.execute(f'ALTER TABLE payees ADD COLUMN {column} TEXT')
+            except sqlite3.OperationalError:
+                pass
         # One default per (what, which, cost type): a service's maintenance
         # payee, or a reagent's supplier, remembered for future projects.
         cur.execute('''
@@ -271,12 +285,14 @@ def load_payees(active_only=True):
     conn = _connect(PAYEE_DB)
     try:
         cur = conn.cursor()
-        query = 'SELECT id, name, kind, active, COALESCE(notes, "") FROM payees'
+        fields = ['id', 'name', 'kind', 'active', 'notes'] + PAYEE_DETAIL_COLUMNS
+        selected = ', '.join(f'COALESCE({f}, "")' if f not in ('id', 'active') else f
+                             for f in fields)
+        query = f'SELECT {selected} FROM payees'
         if active_only:
             query += ' WHERE active = 1'
         query += ' ORDER BY kind DESC, name'
-        return [{'id': r[0], 'name': r[1], 'kind': r[2], 'active': r[3], 'notes': r[4]}
-                for r in cur.execute(query).fetchall()]
+        return [dict(zip(fields, row)) for row in cur.execute(query).fetchall()]
     finally:
         conn.close()
 
@@ -292,21 +308,80 @@ def get_payee_by_name(name):
         conn.close()
 
 
-def add_payee(name, kind='person', current_user="Unknown", notes=""):
+def add_payee(name, kind='person', current_user="Unknown", notes="", **details):
+    """Creates a payee. Contact and payment details are optional here: a payee
+    is often created mid-attribution, when only the name is to hand."""
     name = (name or '').strip()
     if not name:
         raise ValueError("O nome do beneficiario e obrigatorio.")
     init_payee_db()
+    extra = {k: v for k, v in details.items() if k in PAYEE_DETAIL_COLUMNS}
+    unknown = set(details) - set(PAYEE_DETAIL_COLUMNS)
+    if unknown:
+        raise ValueError(f"Unknown payee field(s): {', '.join(sorted(unknown))}")
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    columns = ['name', 'kind', 'active', 'notes', 'created_at', 'created_by'] + list(extra)
+    values = [name, kind, 1, notes, now, current_user] + list(extra.values())
     conn = _connect(PAYEE_DB)
     try:
         cur = conn.cursor()
-        cur.execute('INSERT INTO payees (name, kind, active, notes, created_at, created_by) '
-                    'VALUES (?, ?, 1, ?, ?, ?)',
-                    (name, kind, notes, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user))
+        cur.execute(f'INSERT INTO payees ({", ".join(columns)}) '
+                    f'VALUES ({", ".join("?" * len(columns))})', values)
         conn.commit()
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def update_payee(payee_id, current_user="Unknown", **fields):
+    """Changes a payee's details. Only the editable fields are accepted, so a
+    typo in a caller cannot silently write to the wrong column."""
+    unknown = set(fields) - set(PAYEE_EDITABLE)
+    if unknown:
+        raise ValueError(f"Unknown payee field(s): {', '.join(sorted(unknown))}")
+    if 'name' in fields:
+        fields['name'] = (fields['name'] or '').strip()
+        if not fields['name']:
+            raise ValueError("O nome do beneficiario e obrigatorio.")
+    if not fields:
+        return
+    init_payee_db()
+    fields['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    fields['updated_by'] = current_user
+    conn = _connect(PAYEE_DB)
+    try:
+        assignments = ', '.join(f'{k} = ?' for k in fields)
+        conn.execute(f'UPDATE payees SET {assignments} WHERE id = ?',
+                     list(fields.values()) + [payee_id])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def payee_usage(payee_id):
+    """How many projects reference this payee, so nothing is deleted blind."""
+    init_project_tables()
+    conn = _connect(PROJECT_DB)
+    try:
+        splits = conn.execute(
+            'SELECT COUNT(DISTINCT project_id) FROM project_cost_splits WHERE payee_id = ?',
+            (payee_id,)).fetchone()[0]
+        settled = conn.execute(
+            'SELECT COUNT(*) FROM payee_settlements WHERE payee_id = ? AND paid = 1',
+            (payee_id,)).fetchone()[0]
+    finally:
+        conn.close()
+    conn = _connect(PAYEE_DB)
+    try:
+        defaults = conn.execute(
+            'SELECT COUNT(*) FROM payee_defaults WHERE payee_id = ?', (payee_id,)).fetchone()[0]
+        ledger = conn.execute(
+            "SELECT COUNT(*) FROM ledger_entries WHERE party_type = 'payee' AND party_id = ?",
+            (payee_id,)).fetchone()[0]
+    finally:
+        conn.close()
+    return {'projects': splits, 'settlements': settled,
+            'defaults': defaults, 'ledger_entries': ledger}
 
 
 def set_payee_active(payee_id, active):
