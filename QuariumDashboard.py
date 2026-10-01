@@ -298,6 +298,29 @@ class QuariumDashboard:
         with open('local_config.json', 'w') as f:
             json.dump(config, f)
 
+    def derive_company_name(self, credentials_json):
+        """Names an adopted connection without stopping to ask for one.
+
+        Prefers the company already configured for contracts and estimates,
+        since that is the name the user would have typed anyway, and falls
+        back to the Google project the credentials were issued for.
+        """
+        try:
+            with open('settings.json', 'r', encoding='utf-8') as f:
+                configured = json.load(f).get('contract_info', {}).get('company_name', '')
+            words = str(configured).strip().split()
+            if words:
+                return words[0]
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            for block in json.loads(credentials_json).values():
+                if isinstance(block, dict) and block.get('project_id'):
+                    return str(block['project_id'])
+        except (ValueError, AttributeError):
+            pass
+        return "Default Company"
+
     def save_current_tokens_to_profile(self):
         config = self.load_local_config()
         active = config.get("active_company")
@@ -350,16 +373,22 @@ class QuariumDashboard:
         self.update_splash("Loading local configuration...", 20)
         config = self.load_local_config()
         
-        # Legacy migration for existing users
+        # Adopts a connection that predates company profiles. A workspace
+        # seeded from an older install brings credentials.json across without
+        # a local_config.json, so this now runs on an ordinary first start and
+        # has to be silent about it: the name is derived rather than asked for,
+        # and the Connection Manager can change it afterwards.
+        #
+        # It used to ask here with simpledialog, from this worker thread. The
+        # dialog belongs to the main loop, so waiting on it never returned and
+        # the splash sat on "Loading local configuration..." for good.
         if os.path.exists("credentials.json") and not config["companies"]:
-            comp_name = simpledialog.askstring("Setup", "Existing connection detected.\nPlease enter your Company Name (e.g., Quarium):")
-            if not comp_name: comp_name = "Default Company"
-            
             with open("credentials.json", "r") as f: creds = f.read()
             token_data = ""
             if os.path.exists("token.json"):
                 with open("token.json", "r") as f: token_data = f.read()
-                
+
+            comp_name = self.derive_company_name(creds)
             config["companies"][comp_name] = {"credentials": creds, "token": token_data}
             config["active_company"] = comp_name
             self.save_local_config(config)
@@ -423,8 +452,39 @@ class QuariumDashboard:
                     self.connection_started = True
                     conn_win.destroy()
                     self.continue_startup_after_conn_manager()
-                    
-            ttk.Button(conn_win, text="Connect", command=connect_existing, style="Accent.TButton").pack(pady=5)
+
+            # An adopted connection is named without asking, so there has to be
+            # somewhere to correct it. Safe to prompt from here: this is a
+            # button callback on the main thread, not the startup worker.
+            def rename_existing():
+                sel = comp_var.get()
+                if not sel:
+                    return
+                new_name = simpledialog.askstring(
+                    "Rename Connection", "Name for this connection:",
+                    initialvalue=sel, parent=conn_win)
+                new_name = (new_name or "").strip()
+                if not new_name or new_name == sel:
+                    return
+                if new_name in config["companies"]:
+                    messagebox.showerror(
+                        "Rename Connection",
+                        f"There is already a connection called '{new_name}'.",
+                        parent=conn_win)
+                    return
+                config["companies"][new_name] = config["companies"].pop(sel)
+                if config.get("active_company") == sel:
+                    config["active_company"] = new_name
+                self.save_local_config(config)
+                connectable[connectable.index(sel)] = new_name
+                cb.config(values=connectable)
+                cb.set(new_name)
+
+            buttons = ttk.Frame(conn_win)
+            buttons.pack(pady=5)
+            ttk.Button(buttons, text="Connect", command=connect_existing,
+                       style="Accent.TButton").pack(side="left", padx=4)
+            ttk.Button(buttons, text="Rename", command=rename_existing).pack(side="left", padx=4)
         
         ttk.Separator(conn_win, orient="horizontal").pack(fill="x", pady=15, padx=20)
         
