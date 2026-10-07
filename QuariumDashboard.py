@@ -64,6 +64,7 @@ from QuariumProjectFlow import ProjectFlowManager
 from QuariumContractManager import ContractManager # New import
 from QuariumFinanceManager import FinanceManager
 from QuariumDebts import DebtsManager
+import QuariumLock as QL
 from QuariumPayeeManager import PayeeManager
 
 try:
@@ -909,6 +910,9 @@ class QuariumDashboard:
         else:
             if not self.frames: self.root.after(0, self.finish_init)
             self.enforce_read_only_mode()
+            # Waiting users must check in, or the queue decides they have gone
+            # home and skips past them. This also notices being offered a turn.
+            self.start_presence_poller()
             if not ui_exists:
                 self.root.after(0, lambda: messagebox.showinfo("Read-Only", "You are now in Read-Only mode. Edits cannot be saved."))
 
@@ -929,8 +933,8 @@ class QuariumDashboard:
 
     def acquire_lock(self):
         if self.drive_sync:
-            ld = {"owner": self.current_user, "last_active": time.time(), "request_by": None, "response": None}
-            self.drive_sync.write_lock(ld)  # type: ignore
+            self.drive_sync.write_lock(                          # type: ignore
+                QL.take_free_lock(self.drive_sync.read_lock(), self.current_user))
         self.is_owner = True
         # On the first run the UI does not exist yet, so enable_read_write_mode
         # is not the one to set this.
@@ -940,26 +944,42 @@ class QuariumDashboard:
         self.start_lock_poller()
 
     def request_lock(self, owner):
+        """Joins the queue and waits for the holder to decide."""
         if not self.drive_sync: return
-        self._show_progress_dialog("Requesting Access", f"Waiting for {owner} to respond (15s timeout)...")
-        ld = self.drive_sync.read_lock() or {}  # type: ignore
-        ld['request_by'] = self.current_user
-        ld['response'] = None
-        self.drive_sync.write_lock(ld)  # type: ignore
-        
+        self._show_progress_dialog("Requesting Access",
+                                   f"Asking {owner} for editing access...")
+        try:
+            self.drive_sync.write_lock(                          # type: ignore
+                QL.request(self.drive_sync.read_lock(), self.current_user))
+        except Exception as e:
+            print("Could not join the queue:", e)
+
         def poll_response():
             start = time.time()
-            while time.time() - start < 15:
+            while True:
                 time.sleep(2)
-                data = self.drive_sync.read_lock()  # type: ignore
-                if data and data.get('response') == 'allowed':
+                try:
+                    data = self.drive_sync.read_lock()           # type: ignore
+                except Exception as e:
+                    print("Error while waiting for a response:", e)
+                    data = None
+                # An upload is running on their side. However long it takes,
+                # giving up now would mean opening a copy about to be replaced.
+                if QL.handover_in_progress(data, self.current_user):
+                    self.root.after(0, self._update_progress_dialog,
+                                    f"{owner} is saving their work. This may take a moment...", 50)
+                    start = time.time()
+                    continue
+                if data and data.get('owner') == self.current_user:
                     self.root.after(0, self._on_request_allowed)
                     return
-                elif data and data.get('response') == 'denied':
-                    self.root.after(0, self._on_request_denied, owner)
+                if data and data.get('response') == QL.RESPONSE_DENIED:
+                    self.root.after(0, self._on_request_denied, owner, data)
                     return
-            self.root.after(0, self._on_request_timeout, owner)
-            
+                if time.time() - start >= 25:
+                    self.root.after(0, self._on_request_timeout, owner)
+                    return
+
         threading.Thread(target=poll_response, daemon=True).start()
 
     def _on_request_allowed(self):
@@ -967,16 +987,27 @@ class QuariumDashboard:
         messagebox.showinfo("Access Granted", "Editing permissions transferred to you! Downloading latest data...")
         self.do_sync_down_and_finish(read_only=False)
 
-    def _on_request_denied(self, owner):
+    def _on_request_denied(self, owner, lock=None):
         self._hide_progress_dialog()
-        messagebox.showwarning("Access Denied", f"{owner} declined your request. Opening in Read-Only mode.")
+        note = QL.message_for(lock, self.current_user) if lock else None
+        place = QL.queue_position(lock, self.current_user) if lock else 0
+        said = f"\n\n{owner} says:\n\n\u201c{note['text']}\u201d" if note and note.get('text') else ""
+        waiting = ("\n\nYou are next in line: editing passes to you when they close."
+                   if place == 1 else
+                   f"\n\nYou are number {place} in the queue." if place else "")
+        messagebox.showinfo("Still Editing",
+                            f"{owner} is still working, so Quarium will open Read-Only."
+                            f"{said}{waiting}")
         self.do_sync_down_and_finish(read_only=True)
 
     def _on_request_timeout(self, owner):
         self._hide_progress_dialog()
-        messagebox.showwarning("Timeout", f"{owner} did not respond. Opening in Read-Only mode.")
+        messagebox.showwarning("No Response",
+                               f"{owner} did not respond. Opening in Read-Only mode.\n\n"
+                               "You are in the queue, and editing passes to you when "
+                               "they close.")
         self.do_sync_down_and_finish(read_only=True)
-        
+
     def start_lock_poller(self):
         if not self.drive_sync: return
         self.stop_poller = False
@@ -990,70 +1021,217 @@ class QuariumDashboard:
                             self.is_owner = False
                             self.root.after(0, self._notify_lock_lost)
                             break
-                    if ld.get('request_by') and not ld.get('response'):
-                        self.root.after(0, self.handle_lock_request, ld['request_by'])
+                    waiting = QL.pending_request(ld)
+                    if waiting and not ld.get('response'):
+                        self.root.after(0, self.handle_lock_request, waiting)
                         continue
-                    ld['last_active'] = time.time()
-                    self.drive_sync.write_lock(ld)  # type: ignore
+                    self.drive_sync.write_lock(                  # type: ignore
+                        QL.mark_present(ld, self.current_user))
                 except Exception as e: print("Poller error:", e)
         threading.Thread(target=poll, daemon=True).start()
         
     def handle_lock_request(self, requester):
+        """Asks the holder what to do about someone waiting to edit.
+
+        Three answers, and no answer is one of them: walking away from this
+        dialog hands the lock over, because the alternative is one unattended
+        session blocking everybody else indefinitely.
+        """
         dialog = tk.Toplevel(self.root)
         dialog.title("Edit Request")
-        dialog.geometry("350x160")
+        dialog.geometry("470x350")
         dialog.transient(self.root)
         dialog.grab_set()
-        
         dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 80
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 235
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 175
         dialog.geometry(f"+{x}+{y}")
-        
-        ttk.Label(dialog, text=f"User '{requester}' is requesting edit access.\nIf you yield, your work will be saved\nand you will enter Read-Only mode.", justify="center").pack(pady=10)
-        
-        time_left = tk.IntVar(value=10)
-        ttk.Label(dialog, textvariable=time_left, font=('Helvetica', 12, 'bold')).pack()
-        
-        result = [False]
-        
-        def yield_access(): result[0] = True; dialog.destroy()
-        def deny_access(): result[0] = False; dialog.destroy()
-            
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="Yield Access", command=yield_access, style="Accent.TButton").pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Keep Access", command=deny_access).pack(side="left", padx=5)
-        
+
+        ttk.Label(dialog, text=f"{requester} wants to edit",
+                  font=('Helvetica', 12, 'bold')).pack(pady=(14, 2))
+        ttk.Label(dialog, text="If you do nothing, your work is saved and they get to\n"
+                               "edit while you wait to take it back.",
+                  justify="center", font=('Helvetica', 9)).pack()
+
+        ttk.Label(dialog, text="Message to send them (optional):",
+                  font=('Helvetica', 9)).pack(anchor="w", padx=18, pady=(12, 2))
+        note = tk.Text(dialog, height=3, width=48, wrap="word", relief="solid", borderwidth=1)
+        note.pack(padx=18, fill="x")
+
+        time_left = tk.IntVar(value=20)
+        countdown = ttk.Label(dialog, text="", font=('Helvetica', 9))
+        countdown.pack(pady=(8, 0))
+
+        choice = [None]
+        typed = [""]
+
+        def pick(value):
+            if dialog.winfo_exists():
+                typed[0] = note.get('1.0', 'end-1c').strip()
+            choice[0] = value
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(pady=12, padx=18, fill="x")
+        ttk.Button(buttons, text="Keep editing  -  they wait, and get it when I close",
+                   command=lambda: pick(QL.KEEP)).pack(fill="x", pady=2)
+        ttk.Button(buttons, text="Save and hand over  -  take it back when they finish",
+                   command=lambda: pick(QL.LEND), style="Accent.TButton").pack(fill="x", pady=2)
+        ttk.Button(buttons, text="Save, hand over and close",
+                   command=lambda: pick(QL.HAND_OVER)).pack(fill="x", pady=2)
+
         def update_timer():
-            if not dialog.winfo_exists(): return
-            val = time_left.get()
-            if val > 0: time_left.set(val - 1); dialog.after(1000, update_timer)
-            else: deny_access()
-                
+            if not dialog.winfo_exists():
+                return
+            value = time_left.get()
+            if value > 0:
+                countdown.config(text=f"Handing over automatically in {value}s")
+                time_left.set(value - 1)
+                dialog.after(1000, update_timer)
+            else:
+                pick(QL.LEND)
+
         dialog.after(1000, update_timer)
         self.root.wait_window(dialog)
-        
-        if result[0]:
-            self._show_progress_dialog("Yielding", "Saving databases to cloud...")
-            if self.drive_sync:
-                try:
-                    self.drive_sync.sync_up(self.db_files, self.current_user)  # type: ignore
-                    ld = self.drive_sync.read_lock() or {}  # type: ignore
-                    ld['owner'] = requester; ld['response'] = 'allowed'; ld['request_by'] = None
-                    self.drive_sync.write_lock(ld)  # type: ignore
-                except Exception as e: print("Error yielding:", e)
-            self.is_owner = False
+        self._answer_lock_request(requester, choice[0] or QL.LEND, typed[0])
+
+    def _answer_lock_request(self, requester, decision, message):
+        """Writes the holder's answer, saving first where the answer needs it."""
+        if not self.drive_sync:
+            return
+
+        if decision == QL.KEEP:
+            try:
+                self.drive_sync.write_lock(                      # type: ignore
+                    QL.keep(self.drive_sync.read_lock(), requester, message))
+            except Exception as e:
+                print("Could not answer the edit request:", e)
+            self._show_waiting_count()
+            return
+
+        # The other two answers upload first. Say so in the lock before
+        # starting, so the person waiting holds on instead of timing out
+        # halfway through a large database.
+        lend = decision == QL.LEND
+        self._show_progress_dialog("Handing Over", "Saving your work to the cloud...")
+        try:
+            self.drive_sync.write_lock(                          # type: ignore
+                QL.begin_handover(self.drive_sync.read_lock(), requester, message))
+            self.drive_sync.sync_up(self.db_files, self.current_user)   # type: ignore
+            lock = QL.complete_handover(self.drive_sync.read_lock(), requester,
+                                        lend_back_to=self.current_user if lend else None)
+            if message:
+                lock['messages'][requester] = {'from': self.current_user,
+                                               'text': message, 'at': time.time()}
+            self.drive_sync.write_lock(lock)                     # type: ignore
+        except Exception as e:
+            print("Error handing over the lock:", e)
             self._hide_progress_dialog()
-            self.enforce_read_only_mode()
-            messagebox.showinfo("Read-Only", "You are now in Read-Only mode.")
+            messagebox.showerror(
+                "Handover Failed",
+                f"Your work could not be saved to the cloud:\n\n{e}\n\n"
+                "You still have edit access, so nothing has been given away.")
+            return
+
+        self._hide_progress_dialog()
+        self.enforce_read_only_mode()
+
+        if lend:
+            self.start_presence_poller()
+            messagebox.showinfo(
+                "Handed Over",
+                f"Your work is saved and {requester} can now edit.\n\n"
+                "You are in Read-Only mode. When they finish, you will be asked "
+                "whether to take editing back.")
         else:
-            if self.drive_sync:
+            messagebox.showinfo(
+                "Handed Over",
+                f"Your work is saved and {requester} can now edit.\n\n"
+                "Quarium will now close.")
+            self.root.after(100, self.on_closing)
+
+    def _show_waiting_count(self):
+        """Keeps the sidebar honest about people waiting for the lock."""
+        if not (hasattr(self, 'status_label') and self.status_label.winfo_exists()):
+            return
+        waiting = 0
+        try:
+            lock = self.drive_sync.read_lock() if self.drive_sync else None
+            waiting = len([u for u in QL._normalise(lock)['queue']
+                           if QL.is_present(lock, u)])
+        except Exception:
+            pass
+        suffix = f" ({waiting} waiting)" if waiting else ""
+        self.status_label.config(text=f"● EDITING{suffix}", fg="#2E7D32")
+
+    def start_presence_poller(self):
+        """Checks in while read-only, and notices being offered the lock.
+
+        A waiting instance has to keep a heartbeat of its own: the queue skips
+        anyone who has gone home, and without this every waiter would look
+        like they had.
+        """
+        if not self.drive_sync or getattr(self, 'presence_thread_running', False):
+            return
+        self.presence_thread_running = True
+
+        def poll():
+            while not getattr(self, 'stop_poller', False) and not getattr(self, 'is_owner', False):
                 try:
-                    ld = self.drive_sync.read_lock() or {}  # type: ignore
-                    ld['response'] = 'denied'; ld['last_active'] = time.time()
-                    self.drive_sync.write_lock(ld)  # type: ignore
-                except Exception as e: print("Error denying:", e)
+                    lock = self.drive_sync.read_lock()           # type: ignore
+                    if QL.offered_to(lock, self.current_user):
+                        self.root.after(0, self._offer_edit_access, lock)
+                        break
+                    self.drive_sync.write_lock(                  # type: ignore
+                        QL.mark_present(lock, self.current_user))
+                except Exception as e:
+                    print("Presence poller error:", e)
+                time.sleep(10)
+            self.presence_thread_running = False
+
+        threading.Thread(target=poll, daemon=True).start()
+
+    def _offer_edit_access(self, lock):
+        """Someone finished and the lock came to us. Ask before taking it."""
+        handed_from = (lock.get('handover') or {}).get('from') or "The previous editor"
+        take = messagebox.askyesno(
+            "Editing Available",
+            f"{handed_from} has finished, and editing is now yours if you want it.\n\n"
+            "Taking it will refresh your data with their latest work first.\n\n"
+            "Take over editing?")
+        if not take:
+            try:
+                updated, passed_to = QL.decline(self.drive_sync.read_lock(), self.current_user)
+                self.drive_sync.write_lock(updated)              # type: ignore
+            except Exception as e:
+                print("Could not pass the lock on:", e)
+            self.start_presence_poller()
+            return
+        self._show_progress_dialog("Taking Over", "Downloading the latest data...")
+        try:
+            self.drive_sync.sync_down(self.db_files)             # type: ignore
+            self._record_local_file_mod_times()
+            self.drive_sync.write_lock(                          # type: ignore
+                QL.claim(self.drive_sync.read_lock(), self.current_user))
+        except Exception as e:
+            self._hide_progress_dialog()
+            messagebox.showerror("Could Not Take Over",
+                                 f"The latest data could not be downloaded:\n\n{e}\n\n"
+                                 "Staying in Read-Only mode.")
+            self.start_presence_poller()
+            return
+        self._hide_progress_dialog()
+        for app in self.apps.values():
+            for method in ('load_clients', 'load_services', 'load_all_data', 'load_data',
+                           'refresh_tree', 'load_payees', 'load_approved_projects'):
+                if hasattr(app, method):
+                    try:
+                        getattr(app, method)()
+                    except Exception:
+                        pass
+        self.enable_read_write_mode()
+        self.start_lock_poller()
+        messagebox.showinfo("Editing", "You now have editing access, with the latest data.")
 
     def _set_cloud_writable(self, writable):
         """Keeps the sync's idea of read-only in step with this window's.
@@ -1430,11 +1608,15 @@ class QuariumDashboard:
         self.stop_poller = True
         if getattr(self, 'is_owner', False) and self.drive_sync:
             try:
-                ld = self.drive_sync.read_lock() or {}  # type: ignore
-                if ld.get('owner') == self.current_user:
-                    ld['owner'] = None
-                    self.drive_sync.write_lock(ld)  # type: ignore
-            except Exception: pass
+                # Pass it to whoever has waited longest rather than dropping
+                # it, so someone sitting in read-only is not left refreshing.
+                ld, handed_to = QL.release(self.drive_sync.read_lock(),  # type: ignore
+                                           self.current_user)
+                self.drive_sync.write_lock(ld)  # type: ignore
+                if handed_to:
+                    self._update_progress_dialog(f"Passing editing to {handed_to}...", 45)
+            except Exception as e:
+                print("Could not pass on the edit lock:", e)
 
         self.current_user = None
         self.drive_sync = None
