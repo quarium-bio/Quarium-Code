@@ -932,6 +932,9 @@ class QuariumDashboard:
             ld = {"owner": self.current_user, "last_active": time.time(), "request_by": None, "response": None}
             self.drive_sync.write_lock(ld)  # type: ignore
         self.is_owner = True
+        # On the first run the UI does not exist yet, so enable_read_write_mode
+        # is not the one to set this.
+        self._set_cloud_writable(True)
         if not self.frames: self.root.after(0, self.finish_init)
         else: self.enable_read_write_mode()
         self.start_lock_poller()
@@ -1052,7 +1055,18 @@ class QuariumDashboard:
                     self.drive_sync.write_lock(ld)  # type: ignore
                 except Exception as e: print("Error denying:", e)
 
+    def _set_cloud_writable(self, writable):
+        """Keeps the sync's idea of read-only in step with this window's.
+
+        Both mode switches run through here, so an upload cannot be left
+        enabled by a path that changed is_owner without changing the UI.
+        """
+        if self.drive_sync:
+            self.drive_sync.read_only = not writable
+
     def enforce_read_only_mode(self):
+        self.is_owner = False
+        self._set_cloud_writable(False)
         self.root.title("Quarium Dashboard [READ-ONLY MODE]")
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
             self.status_label.config(text="● READ-ONLY", fg="#D32F2F")
@@ -1064,6 +1078,8 @@ class QuariumDashboard:
             except Exception: pass
 
     def enable_read_write_mode(self):
+        self.is_owner = True
+        self._set_cloud_writable(True)
         self.root.title("Quarium Dashboard")
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
             self.status_label.config(text="● EDITING", fg="#2E7D32")
@@ -1509,9 +1525,18 @@ class QuariumDashboard:
                         files_to_upload.append(f)
             
             if files_to_upload:
-                self._update_progress_dialog(f"Syncing {len(files_to_upload)} changed file(s) to cloud...", 60)
+                # A read-only window still saves its work, but as conflict
+                # copies: the canonical files belong to whoever holds the lock.
+                read_only = not getattr(self, 'is_owner', True)
+                self._update_progress_dialog(
+                    (f"Saving {len(files_to_upload)} changed file(s) as conflict copies..."
+                     if read_only else
+                     f"Syncing {len(files_to_upload)} changed file(s) to cloud..."), 60)
                 try:
-                    self.drive_sync.sync_up(files_to_upload, self.current_user)  # type: ignore
+                    result = self.drive_sync.sync_up(files_to_upload, self.current_user)  # type: ignore
+                    if result and result['conflicts']:
+                        self._update_progress_dialog(
+                            f"{len(result['conflicts'])} file(s) kept as conflict copies.", 80)
                 except Exception as e:
                     print("Could not sync databases back to Google Drive:", e)
             else:
@@ -2387,12 +2412,28 @@ class QuariumDashboard:
             parent=dialog)
 
     def _select_image(self, target_filename):
+        # Replacing a logo is an edit, and it is shared: without this a
+        # read-only window reported the change as done while the file it
+        # actually sent was a conflict copy nobody would look at.
+        if not getattr(self, 'is_owner', True):
+            messagebox.showwarning(
+                "Read-Only",
+                "Another user is editing, so images cannot be changed right now.\n\n"
+                "Use 'Request Edit Access' and try again once they hand over.")
+            return
         file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg")])
         if file_path:
             try:
                 shutil.copy(file_path, target_filename)
-                if self.drive_sync:
-                    self.drive_sync.sync_up([target_filename])
+                result = self.drive_sync.sync_up([target_filename]) if self.drive_sync else None
+                if result and result['conflicts']:
+                    messagebox.showwarning(
+                        "Saved Locally",
+                        f"{target_filename} was changed on this computer, but the copy in "
+                        "the cloud had already moved on, so your version was kept beside "
+                        "it as a conflict file rather than replacing it.\n\n"
+                        "See Settings > Sync Conflicts.")
+                    return
                 messagebox.showinfo("Success", f"{target_filename} updated successfully! Dashboard changes will reflect upon restart.")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to copy image: {e}")
@@ -2433,6 +2474,15 @@ class QuariumDashboard:
             messagebox.showerror("Export Error", f"Failed to export backup: {e}")
 
     def _import_backup(self):
+        # This replaces every database, locally and then in the cloud. Doing it
+        # while someone else holds the edit lock would overwrite the work they
+        # are in the middle of, with no way back.
+        if not getattr(self, 'is_owner', True):
+            messagebox.showwarning(
+                "Read-Only",
+                "Another user is editing, so a backup cannot be restored right now.\n\n"
+                "Restoring replaces every database. Wait until you have edit access.")
+            return
         file_path = filedialog.askopenfilename(filetypes=[("Quarium Backup", "*.qbak")], title="Select Encrypted Backup")
         if not file_path: return
         

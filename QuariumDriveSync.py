@@ -50,6 +50,11 @@ class DriveSyncManager:
         self.service = None
         self.file_versions = {}
         self.api_lock = threading.RLock()
+        # Set while another user holds the edit lock. An instance in that state
+        # must never replace a canonical file in the cloud: the copy it holds
+        # is one it was told not to change, and the owner has been editing
+        # theirs since. Anything it has to save goes up as a conflict copy.
+        self.read_only = False
         if not GOOGLE_API_AVAILABLE:
             raise ImportError("Google API client libraries are not installed. Please install google-api-python-client google-auth-httplib2 google-auth-oauthlib")
         self.authenticate()
@@ -178,16 +183,30 @@ class DriveSyncManager:
                     self.file_versions[name] = files_in_drive[name]['modifiedTime']
 
     def sync_up(self, filenames, current_user="Unknown"):
+        """Sends files to the cloud. Returns what actually happened.
+
+        {'updated': [...], 'conflicts': [...], 'read_only': bool}
+
+        A file is only replaced when this instance holds the edit lock and the
+        cloud copy has not moved since it was last read. Otherwise the work is
+        preserved as a conflict copy beside it, so nothing is lost and nobody
+        else's file is overwritten. Callers must not report an upload without
+        checking what came back.
+        """
         with self.api_lock:
             files_in_drive = self.list_appdata_files()
             conflicts = []
+            updated = []
             for name in filenames:
                 if os.path.exists(name):
                     drive_file = files_in_drive.get(name)
                     if drive_file:
                         cloud_time = drive_file.get('modifiedTime')
                         known_time = self.file_versions.get(name)
-                        if known_time and cloud_time and cloud_time != known_time:
+                        diverged = bool(known_time and cloud_time and cloud_time != known_time)
+                        # Read-only is treated exactly like a diverged file:
+                        # the canonical copy belongs to whoever holds the lock.
+                        if diverged or self.read_only:
                             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                             clean_user = "".join(c for c in current_user if c.isalnum()) or "Unknown"
                             conflict_name = f"{name.split('.')[0]}_conflict_{clean_user}_{timestamp}.{name.split('.')[-1]}"
@@ -195,6 +214,17 @@ class DriveSyncManager:
                             conflicts.append(name)
                             continue
                         self.upload_file(name, name, drive_file['id'])
+                        updated.append(name)
+                    elif self.read_only:
+                        # Nothing to overwrite, but this instance is still not
+                        # the one that gets to say what the canonical file is.
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        clean_user = "".join(c for c in current_user if c.isalnum()) or "Unknown"
+                        conflict_name = f"{name.split('.')[0]}_conflict_{clean_user}_{timestamp}.{name.split('.')[-1]}"
+                        self.upload_file(name, conflict_name, None)
+                        conflicts.append(name)
                     else:
                         self.upload_file(name, name, None)
+                        updated.append(name)
+            return {'updated': updated, 'conflicts': conflicts, 'read_only': self.read_only}
             return conflicts
