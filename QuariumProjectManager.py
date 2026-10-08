@@ -1468,18 +1468,26 @@ class ProjectManager:
         ttk.Button(btn_frame, text="Preview PDF", command=preview).pack(side="right", padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
 
-    def generate_pdf(self, project_id, estimate_number, description, notes, is_preview=False, discount_name="Desconto"):
+    def generate_pdf(self, project_id, estimate_number, description, notes, is_preview=False, discount_name="Desconto", cursor=None, pdf_path=None):
+        """Renders an estimate exactly as the client would have received it.
+
+        cursor and pdf_path exist so a recovered estimate can be rendered from
+        a database set aside after a crash, through this same template rather
+        than a second one that would drift away from it.
+        """
         import tempfile
         import webbrowser
+
+        cur = cursor if cursor is not None else self.cursor
         
-        self.cursor.execute('''
+        cur.execute('''
             SELECT p.created_at, p.validity_days, p.responsible_user, p.total_samples, p.discount_percentage, p.final_cost,
                    c.name, c.email, c.phone
             FROM projects p
             LEFT JOIN clients_db.clients c ON p.client_id = c.id
             WHERE p.id = ?
         ''', (project_id,))
-        p_data = self.cursor.fetchone()
+        p_data = cur.fetchone()
         created_at, validity_days, user, total_samples, discount_pct, final_cost, c_name, c_email, c_phone = p_data
         
         client_parts = [c_name if c_name else "Unknown"]
@@ -1491,7 +1499,9 @@ class ProjectManager:
         try: date_str = datetime.strptime(date_str, '%Y-%m-%d').strftime('%d/%m/%Y')
         except: pass
 
-        if is_preview:
+        if pdf_path:
+            pass                      # the caller already chose where it goes
+        elif is_preview:
             pdf_path = os.path.join(tempfile.gettempdir(), f"Preview_Orcamento_{estimate_number}.pdf")
         else:
             pdf_path = filedialog.asksaveasfilename(defaultextension=".pdf", initialfile=f"Orcamento_{estimate_number}.pdf", title="Save Estimate PDF", filetypes=[("PDF files", "*.pdf")])
@@ -1539,7 +1549,7 @@ class ProjectManager:
         elements.append(Spacer(1, 1*cm))
         
         services_data = [[Paragraph("<b>Qtd</b>", normal_style), Paragraph("<b>Descrição</b>", normal_style), Paragraph("<b>Preço Unidade</b>", normal_style), Paragraph("<b>Total Parcial</b>", normal_style)]]
-        self.cursor.execute('''
+        cur.execute('''
             SELECT ps.samples_override, ps.calculated_cost, s.name, COALESCE(ps.custom_description, s.description)
             FROM project_services ps
             JOIN services_db.services s ON ps.service_id = s.id
@@ -1547,7 +1557,7 @@ class ProjectManager:
         ''', (project_id,))
         
         raw_total = 0.0
-        for s_override, s_cost, s_name, s_desc in self.cursor.fetchall():
+        for s_override, s_cost, s_name, s_desc in cur.fetchall():
             qty = s_override if s_override is not None else total_samples
             unit_cost = s_cost / qty if qty > 0 else 0
             raw_total += s_cost

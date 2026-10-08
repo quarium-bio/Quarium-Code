@@ -855,6 +855,9 @@ class QuariumDashboard:
         self.recovery_add_btn = ttk.Button(buttons, text="Add This Back",
                                            command=self._recovery_add, state="disabled")
         self.recovery_add_btn.pack(side="left")
+        self.recovery_pdf_btn = ttk.Button(buttons, text="Save as PDF",
+                                           command=self._recovery_pdf, state="disabled")
+        self.recovery_pdf_btn.pack(side="left", padx=6)
         ttk.Button(buttons, text="Dismiss", command=self._recovery_dismiss).pack(side="left", padx=6)
         ttk.Button(buttons, text="Refresh", command=self._refresh_recovery_tab).pack(side="right")
 
@@ -909,6 +912,9 @@ class QuariumDashboard:
         present = QR.already_present(_BASE_DIR, item) if item.get('kind') == 'added' else None
         can_add = bool(item.get('insertable')) and not present and getattr(self, 'is_owner', True)
         self.recovery_add_btn.config(state="normal" if can_add else "disabled")
+        # An estimate cannot be put back, but it can be shown in full.
+        self.recovery_pdf_btn.config(
+            state="normal" if item.get('table') == 'projects' else "disabled")
         if item.get('kind') == 'changed':
             self.recovery_note.config(
                 text=f"{QR.describe(item)}\n\nA changed value cannot be put back "
@@ -918,6 +924,12 @@ class QuariumDashboard:
             self.recovery_note.config(
                 text=f"'{item['name']}' is already in the system. Compare it with your "
                      f"version before dismissing this.")
+        elif item.get('table') == 'projects':
+            self.recovery_note.config(
+                text=f"{QR.describe(item)}\n\nAn estimate has to be re-entered by hand: it "
+                     f"refers to services and a client by number, and those numbers mean "
+                     f"something different in the copy that was kept. Save it as a PDF to "
+                     f"see every service and amount exactly as the estimate had them.")
         elif not item.get('insertable'):
             self.recovery_note.config(
                 text=f"{QR.describe(item)}\n\nThis one has to be re-entered by hand: it "
@@ -955,6 +967,61 @@ class QuariumDashboard:
         self._refresh_recovery_tab()
         messagebox.showinfo("Added", f"'{item['name']}' is back in the system.",
                             parent=self.root)
+
+    def _recovery_pdf(self):
+        """Renders a lost estimate as the client would have received it.
+
+        Through the estimate generator itself, pointed at the database that
+        was set aside, so what comes out matches the real thing rather than a
+        second template that would drift away from it.
+        """
+        item = self._recovery_current()
+        if not item or item.get('table') != 'projects':
+            return
+        manager = self.apps.get('Projects')
+        if not manager or not hasattr(manager, 'generate_pdf'):
+            messagebox.showerror("Not Available",
+                                 "The estimate generator is not loaded.", parent=self.root)
+            return
+
+        conn, cursor, project_id = QR.open_stashed_estimate(_BASE_DIR, item)
+        if not cursor:
+            messagebox.showerror(
+                "Not Available",
+                "The set-aside copy of this estimate could not be opened. It may "
+                "have been removed from the recovery folder.", parent=self.root)
+            return
+        try:
+            row = cursor.execute(
+                "SELECT COALESCE(description, ''), COALESCE(notes, '') "
+                "FROM projects WHERE id = ?", (project_id,)).fetchone()
+            description, notes = row if row else ("", "")
+            target = filedialog.asksaveasfilename(
+                defaultextension=".pdf", initialfile=f"Orcamento_{item['name']}_recuperado.pdf",
+                title="Save the recovered estimate", filetypes=[("PDF files", "*.pdf")])
+            if not target:
+                return
+            manager.generate_pdf(project_id, item['name'], description, notes,
+                                 cursor=cursor, pdf_path=target)
+        except Exception as e:
+            messagebox.showerror("Could Not Render",
+                                 f"The estimate could not be rendered:\n\n{e}",
+                                 parent=self.root)
+            return
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if messagebox.askyesno(
+                "Saved",
+                f"The recovered estimate was saved to:\n\n{target}\n\nOpen it now?",
+                parent=self.root):
+            try:
+                import webbrowser
+                webbrowser.open(target)
+            except Exception as e:
+                print("Could not open the recovered estimate:", e)
 
     def _recovery_dismiss(self):
         item = self._recovery_current()

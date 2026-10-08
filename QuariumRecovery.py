@@ -388,6 +388,42 @@ def _lookup_id(conn, table, key_field, value):
     return found[0] if found else None
 
 
+def open_stashed_estimate(base_dir, item):
+    """A cursor over the set-aside projects.db, ready to render an estimate.
+
+    The estimate's services and client live in other databases, which may not
+    have been set aside: only a database that changed on both sides is. The
+    live ones stand in where there is no stashed copy, which is right as well
+    as convenient, since a service's name and a client's details are what
+    they are now, not what they were at the moment of the crash.
+
+    Returns (connection, cursor, project_id), or (None, None, None).
+    """
+    stash_path = item.get('stash')
+    if not stash_path or not os.path.exists(stash_path):
+        return None, None, None
+    conn = sqlite3.connect(f"file:{stash_path}?mode=ro", uri=True)
+    cur = conn.cursor()
+    folder = os.path.dirname(stash_path)
+    for alias, name in (('clients_db', 'clients.db'), ('services_db', 'services.db')):
+        candidate = os.path.join(base_dir, name)
+        # Prefer a stashed copy of the same vintage if one was taken.
+        same_vintage = [f for f in sorted(os.listdir(folder))
+                        if f.startswith(os.path.splitext(name)[0] + '_') and f.endswith('.db')]
+        if same_vintage:
+            candidate = os.path.join(folder, same_vintage[-1])
+        try:
+            cur.execute(f"ATTACH DATABASE ? AS {alias}", (candidate,))
+        except sqlite3.Error as e:
+            print(f"Could not attach {name} for the recovered estimate: {e}")
+    row = cur.execute("SELECT id FROM projects WHERE estimate_number = ?",
+                      (item['name'],)).fetchone()
+    if not row:
+        conn.close()
+        return None, None, None
+    return conn, cur, row[0]
+
+
 def describe(item):
     """One line a person can act on, in business terms rather than row ids."""
     if item['kind'] == 'added':
