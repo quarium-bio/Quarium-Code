@@ -88,7 +88,7 @@ except ImportError:
     # Add this line to prevent errors if crypto is missing
     os.urandom = lambda x: b'x' * x 
 
-CURRENT_VERSION = "2.2.0"
+CURRENT_VERSION = "2.2.1"
 UPDATE_URL = "https://raw.githubusercontent.com/quarium-bio/Quarium-Code/main/version.json" # Change to your actual raw URL
 
 class SectionNav(ttk.Frame):
