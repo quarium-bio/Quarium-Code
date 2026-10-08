@@ -65,6 +65,7 @@ from QuariumContractManager import ContractManager # New import
 from QuariumFinanceManager import FinanceManager
 from QuariumDebts import DebtsManager
 import QuariumLock as QL
+import QuariumRecovery as QR
 from QuariumPayeeManager import PayeeManager
 
 try:
@@ -822,6 +823,226 @@ class QuariumDashboard:
                         "To prevent data loss, you have been placed in Read-Only mode.")
                     return
             
+    def _build_recovery_tab(self, parent):
+        """Work from a session that ended before saving, waiting to be dealt
+        with. Deliberately not a startup prompt: whether an entry is still
+        needed depends on what everyone else did, which takes looking around
+        to find out."""
+        ttk.Label(parent, text="Work recovered from an interrupted session",
+                  font=("Helvetica", 11, "bold")).pack(anchor="w")
+        ttk.Label(parent, wraplength=560, justify="left", foreground="#4B5563",
+                  text="These came from a session that could not save before it ended, while "
+                       "someone else was editing. They could not be combined automatically, so "
+                       "nothing has been applied. Check whether each one is already in the "
+                       "system, then add it back or dismiss it.").pack(anchor="w", pady=(2, 10))
+
+        self.recovery_list = ttk.Treeview(
+            parent, columns=("What", "Status"), show="tree headings", height=10)
+        self.recovery_list.heading("#0", text="Item")
+        self.recovery_list.heading("What", text="Details")
+        self.recovery_list.heading("Status", text="In the system now")
+        self.recovery_list.column("#0", width=210)
+        self.recovery_list.column("What", width=250)
+        self.recovery_list.column("Status", width=160)
+        self.recovery_list.pack(fill="both", expand=True)
+
+        self.recovery_note = ttk.Label(parent, text="", wraplength=560, justify="left",
+                                       foreground="#4B5563")
+        self.recovery_note.pack(anchor="w", pady=(8, 0))
+
+        buttons = ttk.Frame(parent)
+        buttons.pack(fill="x", pady=(10, 0))
+        self.recovery_add_btn = ttk.Button(buttons, text="Add This Back",
+                                           command=self._recovery_add, state="disabled")
+        self.recovery_add_btn.pack(side="left")
+        ttk.Button(buttons, text="Dismiss", command=self._recovery_dismiss).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Refresh", command=self._refresh_recovery_tab).pack(side="right")
+
+        self.recovery_list.bind("<<TreeviewSelect>>", lambda _e: self._recovery_selected())
+        self._refresh_recovery_tab()
+
+    def _refresh_recovery_tab(self):
+        if not hasattr(self, 'recovery_list') or not self.recovery_list.winfo_exists():
+            return
+        self.recovery_list.delete(*self.recovery_list.get_children())
+        self._recovery_items = QR.load_pending(_BASE_DIR)
+        for item in self._recovery_items:
+            # Checked now rather than when the entry was made: somebody may
+            # have added the same thing since, which is the point of waiting.
+            present = QR.already_present(_BASE_DIR, item) if item.get('kind') == 'added' else None
+            if item.get('kind') == 'changed':
+                status = "value differs"
+            elif present:
+                status = "already added"
+            else:
+                status = "missing"
+            detail = ", ".join(f"{k}: {v}" for k, v in (item.get('detail') or {}).items())
+            if item.get('kind') == 'changed':
+                detail = "; ".join(f"{f}: {p['theirs']} \u2192 {p['yours']}"
+                                   for f, p in (item.get('changes') or {}).items())
+            self.recovery_list.insert(
+                "", "end", iid=item['id'],
+                text=f"{item.get('label', '?')}  {item.get('name', '')}",
+                values=(detail[:70], status))
+        if not self._recovery_items:
+            self.recovery_note.config(
+                text="Nothing is waiting. Anything recovered from an interrupted "
+                     "session would be listed here.")
+        else:
+            self.recovery_note.config(
+                text=f"{len(self._recovery_items)} item(s) waiting. Your original copy is "
+                     f"kept in the 'recovery' folder of the data directory.")
+        self._recovery_selected()
+
+    def _recovery_current(self):
+        selection = self.recovery_list.selection() if hasattr(self, 'recovery_list') else ()
+        if not selection:
+            return None
+        return next((i for i in getattr(self, '_recovery_items', [])
+                     if i['id'] == selection[0]), None)
+
+    def _recovery_selected(self):
+        item = self._recovery_current()
+        if not item:
+            self.recovery_add_btn.config(state="disabled")
+            return
+        present = QR.already_present(_BASE_DIR, item) if item.get('kind') == 'added' else None
+        can_add = bool(item.get('insertable')) and not present and getattr(self, 'is_owner', True)
+        self.recovery_add_btn.config(state="normal" if can_add else "disabled")
+        if item.get('kind') == 'changed':
+            self.recovery_note.config(
+                text=f"{QR.describe(item)}\n\nA changed value cannot be put back "
+                     f"automatically, because the other version may be the newer one. "
+                     f"Change it by hand if yours is the one that should stand.")
+        elif present:
+            self.recovery_note.config(
+                text=f"'{item['name']}' is already in the system. Compare it with your "
+                     f"version before dismissing this.")
+        elif not item.get('insertable'):
+            self.recovery_note.config(
+                text=f"{QR.describe(item)}\n\nThis one has to be re-entered by hand: it "
+                     f"refers to other records by number, and those numbers mean "
+                     f"something different in the copy that was kept.")
+        elif not getattr(self, 'is_owner', True):
+            self.recovery_note.config(
+                text="Another user is editing, so nothing can be added back right now.")
+        else:
+            self.recovery_note.config(text=QR.describe(item))
+
+    def _recovery_add(self):
+        item = self._recovery_current()
+        if not item:
+            return
+        if not messagebox.askyesno(
+                "Add This Back",
+                f"Add {item.get('label', 'this')} '{item['name']}' back into the system?",
+                parent=self.root):
+            return
+        try:
+            QR.reinsert(_BASE_DIR, item)
+        except Exception as e:
+            messagebox.showerror("Could Not Add", str(e), parent=self.root)
+            self._refresh_recovery_tab()
+            return
+        QR.resolve_pending(_BASE_DIR, item['id'])
+        for app in self.apps.values():
+            for method in ('load_clients', 'load_payees', 'refresh_tree'):
+                if hasattr(app, method):
+                    try:
+                        getattr(app, method)()
+                    except Exception:
+                        pass
+        self._refresh_recovery_tab()
+        messagebox.showinfo("Added", f"'{item['name']}' is back in the system.",
+                            parent=self.root)
+
+    def _recovery_dismiss(self):
+        item = self._recovery_current()
+        if not item:
+            return
+        if not messagebox.askyesno(
+                "Dismiss",
+                f"Remove '{item['name']}' from this list?\n\n"
+                "The copy kept in the recovery folder is not deleted.",
+                parent=self.root):
+            return
+        QR.resolve_pending(_BASE_DIR, item['id'])
+        self._refresh_recovery_tab()
+
+    def _record_sync_state(self):
+        """Writes down what each database looks like now, and which cloud
+        version it matches. Survives a crash, which is the whole point: the
+        in-memory copy of this dies with the process."""
+        if not self.drive_sync:
+            return
+        try:
+            in_drive = self.drive_sync.list_appdata_files()      # type: ignore
+            QR.record_sync(_BASE_DIR, self.db_files,
+                           {n: v.get('modifiedTime') for n, v in in_drive.items()})
+        except Exception as e:
+            print("Could not record the sync state:", e)
+
+    def _recover_unsaved_work(self):
+        """Deals with a session that ended before it saved.
+
+        Returns the databases whose local copy was set aside, which are the
+        ones that have to be downloaded over regardless of timestamps.
+        """
+        if not self.drive_sync:
+            return {}
+        try:
+            in_drive = self.drive_sync.list_appdata_files()      # type: ignore
+            cloud_times = {n: v.get('modifiedTime') for n, v in in_drive.items()}
+            verdict = QR.classify(_BASE_DIR, self.db_files, cloud_times)
+        except Exception as e:
+            print("Could not check for unsaved work:", e)
+            return {}
+
+        alone = [n for n, v in verdict.items() if v == QR.LOCAL_ONLY]
+        contested = [n for n, v in verdict.items() if v == QR.BOTH_CHANGED]
+
+        if alone:
+            # Nobody else has touched these since, so there is nothing to
+            # weigh up and nobody to consult: send the work and move on.
+            self.update_splash(f"Restoring {len(alone)} unsaved file(s)...", 86)
+            try:
+                self.drive_sync.sync_up(alone, self.current_user)     # type: ignore
+                print(f"Recovered an unsaved session: uploaded {', '.join(alone)}")
+            except Exception as e:
+                print("Could not upload the unsaved work:", e)
+
+        stashes = {}
+        for name in contested:
+            try:
+                stashes[name] = QR.stash(_BASE_DIR, name)
+            except OSError as e:
+                print(f"Could not set aside the unsaved {name}: {e}")
+        if stashes:
+            self.update_splash("Keeping your unsaved work aside...", 88)
+        return stashes
+
+    def _finish_recovery(self, stashes):
+        """Compares what was set aside against what was downloaded."""
+        if not stashes:
+            return
+        try:
+            findings = QR.compare_workspace(stashes, _BASE_DIR)
+        except Exception as e:
+            print("Could not compare the unsaved work:", e)
+            return
+        if not findings:
+            return
+        QR.add_pending(_BASE_DIR, findings)
+        count = len(findings)
+        self.root.after(1200, lambda: messagebox.showwarning(
+            "Unsaved Work Recovered",
+            f"Your last session ended before it could save, and someone else "
+            f"edited in the meantime, so the two could not be combined "
+            f"automatically.\n\n{count} item(s) from your session are waiting "
+            f"in Settings > Recovered Work.\n\nNothing has been lost: your copy "
+            f"was kept. Look through the data first, then add back anything "
+            f"that is still missing."))
+
     def _record_local_file_mod_times(self):
         """Records the modification times of local database files after a sync."""
         self.local_file_mod_times.clear()
@@ -850,7 +1071,7 @@ class QuariumDashboard:
                 continue
         return None
 
-    def _conditional_sync_down(self, files_to_sync):
+    def _conditional_sync_down(self, files_to_sync, force=()):
         """Downloads files only if the cloud version is newer than the local version."""
         if not self.drive_sync:
             return
@@ -861,6 +1082,14 @@ class QuariumDashboard:
                 cloud_mod_time_str = files_in_drive[name].get('modifiedTime')
                 if not cloud_mod_time_str:
                     self.drive_sync.download_file(files_in_drive[name]['id'], name)
+                    continue
+
+                # A file whose local copy has been set aside is downloaded
+                # whatever the timestamps say: the cloud copy is the one
+                # everybody else has been working from.
+                if name in force:
+                    self.drive_sync.download_file(files_in_drive[name]['id'], name)
+                    self.drive_sync.file_versions[name] = cloud_mod_time_str
                     continue
 
                 # Compare modification times
@@ -887,12 +1116,18 @@ class QuariumDashboard:
                     if hasattr(app, 'conn'): app.conn.close()
                 except Exception: pass
 
+        # Before a download can overwrite anything, work out whether the
+        # last session ended without saving, and protect what it left.
+        stashes = self._recover_unsaved_work()
+
         self.update_splash("Downloading latest databases...", 90)
-        try: self._conditional_sync_down(self.db_files)
+        try: self._conditional_sync_down(self.db_files, force=set(stashes))
         except Exception as e: print("Sync down error:", e)
+        self._finish_recovery(stashes)
         
         # Record the state of files after download to check for changes later
         self._record_local_file_mod_times()
+        self._record_sync_state()
         
         if ui_exists:
             old_view = self.current_view.get()
@@ -1716,6 +1951,7 @@ class QuariumDashboard:
                      f"Syncing {len(files_to_upload)} changed file(s) to cloud..."), 60)
                 try:
                     result = self.drive_sync.sync_up(files_to_upload, self.current_user)  # type: ignore
+                    self._record_sync_state()
                     if result and result['conflicts']:
                         self._update_progress_dialog(
                             f"{len(result['conflicts'])} file(s) kept as conflict copies.", 80)
@@ -2154,6 +2390,10 @@ class QuariumDashboard:
 
         conflicts_frame = ttk.Frame(notebook, padding=(18, 14))
         notebook.add(conflicts_frame, text="Sync Conflicts", group="Sync and Data")
+
+        recovery_frame = ttk.Frame(notebook, padding=(18, 14))
+        notebook.add(recovery_frame, text="Recovered Work", group="Sync and Data")
+        self._build_recovery_tab(recovery_frame)
         
         ttk.Label(conflicts_frame, text="Conflict files are generated when two users edit the database simultaneously, or if someone works offline. Download them here to manually inspect the changes, then delete them from the cloud when resolved.", wraplength=500).pack(pady=(0, 10), anchor="w")
         
